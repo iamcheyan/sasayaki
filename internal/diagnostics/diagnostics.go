@@ -55,18 +55,22 @@ func All(p config.Paths) Report { return AllWith(DefaultRunner, p) }
 // AllWith runs every check with a custom runner.
 func AllWith(r Runner, p config.Paths) Report {
 	report := Report{Version: 1}
+	cfg, err := config.Load(p)
+	if err != nil {
+		cfg = config.Default()
+	}
 	report.Checks = append(report.Checks,
 		toolCheck(r, "python3", "Python 3 interpreter", "Install python3 (e.g. dnf install python3 / apt install python3)"),
 		toolCheck(r, "parecord", "Microphone recorder (PulseAudio/PipeWire)", "Install pulseaudio-utils (dnf/apt/pacman)"),
 	)
 	report.Checks = append(report.Checks, systemdCheck(r))
 	report.Checks = append(report.Checks, runtimeCheck(p))
-	report.Checks = append(report.Checks, modelCheck(p))
+	report.Checks = append(report.Checks, modelCheck(p, cfg.SpeechModel))
 	report.Checks = append(report.Checks, micCheck(r))
 	report.Checks = append(report.Checks, clipboardCheck(r))
 	report.Checks = append(report.Checks, pasteBackendCheck(r))
 	report.Checks = append(report.Checks, socketCheck(p))
-	report.Model = transcribe.VerifyModel(p)
+	report.Model = transcribe.VerifyModelFor(p, cfg.SpeechModel)
 	return report
 }
 
@@ -109,10 +113,14 @@ func runtimeCheck(p config.Paths) Check {
 	}
 }
 
-func modelCheck(p config.Paths) Check {
-	problems := transcribe.VerifyModel(p)
+func modelCheck(p config.Paths, id string) Check {
+	model, known := transcribe.SpeechModelByID(id)
+	problems := transcribe.VerifyModelFor(p, id)
 	if len(problems) == 0 {
-		return Check{Name: "speech model", OK: true, Detail: "SenseVoice model verified (" + transcribe.Model.Version + ")"}
+		return Check{Name: "speech model", OK: true, Detail: model.Label + " verified (" + model.Architecture + ")"}
+	}
+	if !known {
+		return Check{Name: "speech model", OK: false, Detail: strings.Join(problems, "; "), Fix: "Choose a known model with `sasayaki models`"}
 	}
 	return Check{
 		Name:   "speech model",
