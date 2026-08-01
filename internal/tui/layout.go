@@ -124,20 +124,28 @@ func computeLayout(width, height int) layout {
 	if maxWidth > 124 {
 		maxWidth = 124
 	}
-	l := layout{maxWidth: maxWidth}
-	if maxWidth >= 78 {
+	l := layout{maxWidth: maxWidth, cardWidth: maxWidth}
+	// 80-column terminals have 76 usable columns after the shared margin.
+	// Two 37-column cards are still legible, and this avoids turning the
+	// standard 80×24 terminal into a tall, cramped stack.
+	if maxWidth >= 70 {
 		l.sideBySide = true
 		l.cardWidth = (maxWidth - 2) / 2
 	}
-	if maxWidth < 40 || height < 12 {
+	// header + blank + cards + blank + footer. Stacked cards need a second
+	// card plus its separator, so a short terminal receives the compact but
+	// still actionable screen instead of clipped borders.
+	l.totalHeight = 1 + 1 + cardHeight + 1 + 1
+	if !l.sideBySide {
+		l.totalHeight += cardHeight + 1
+	}
+	if maxWidth < 40 || height < l.totalHeight {
 		l.compact = true
 	}
-	// header + blank + cards + blank + footer
-	l.totalHeight = 1 + 1 + cardHeight + 1 + 1
 	return l
 }
 
 // cardHeight is the outside height of both cards, equal by construction.
 // It includes the two border rows and leaves enough breathing room for the
 // deliberately small main-screen content.
-const cardHeight = 13
+const cardHeight = 15

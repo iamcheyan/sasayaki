@@ -282,7 +282,7 @@ func (m Model) dot(color lipgloss.Color) string {
 // footer is the centered bottom line: transient notice while fresh, else
 // the key hints.
 func (m Model) footer() string {
-	text := "t record   s setup   d stop   b shortcut   ? help   q quit"
+	text := "t record   s setup   d disable   b shortcut   ? help   q quit"
 	if m.notice != "" && time.Now().Before(m.noticeUntil) {
 		text = m.notice
 	}

@@ -37,25 +37,35 @@ func TestComputeLayoutWideSideBySide(t *testing.T) {
 }
 
 func TestComputeLayoutNarrowStacked(t *testing.T) {
-	l := computeLayout(60, 30)
+	l := computeLayout(60, 40)
 	if l.sideBySide {
 		t.Fatal("narrow terminal should stack the cards")
 	}
 	if l.compact {
-		t.Fatal("60×30 is not compact")
+		t.Fatal("60×40 is not compact")
+	}
+	if l.cardWidth != l.maxWidth {
+		t.Fatalf("stacked card width = %d, want full content width %d", l.cardWidth, l.maxWidth)
 	}
 }
 
 func TestComputeLayout80x24NoPanic(t *testing.T) {
 	// The brief guarantees the TUI renders at 80×24 without panicking.
 	l := computeLayout(80, 24)
-	if l.compact {
-		t.Fatal("80×24 should use the full view")
+	if l.compact || !l.sideBySide {
+		t.Fatal("80×24 should use the side-by-side full view")
 	}
 	m := New(testPaths(t))
 	m.width, m.height = 80, 24
 	m.layout = computeLayout(80, 24)
 	_ = m.View() // must not panic
+}
+
+func TestComputeLayoutUsesCompactWhenStackedCardsCannotFit(t *testing.T) {
+	l := computeLayout(60, 24)
+	if !l.compact {
+		t.Fatal("short stacked terminal must use compact view instead of clipping cards")
+	}
 }
 
 func TestComputeLayoutVeryNarrowCompact(t *testing.T) {

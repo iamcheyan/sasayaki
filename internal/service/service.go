@@ -77,6 +77,11 @@ type Daemon struct {
 	recorder       recording.Recorder
 	recordingPath  string
 	recordingStart time.Time
+	// generation identifies the active recording/transcription pipeline.
+	// Cancelling or starting a new recording invalidates older goroutines so
+	// a late model result can never paste into the next user's context.
+	generation          uint64
+	recordingGeneration uint64
 
 	phase      protocol.Phase
 	lastResult string
@@ -85,8 +90,6 @@ type Daemon struct {
 	lastAt     time.Time
 
 	workerErr error
-
-	cancelled bool
 
 	done chan struct{}
 	once sync.Once
@@ -280,12 +283,11 @@ func (d *Daemon) Cancel() (string, *protocol.Error) {
 		_ = d.recorder.Cancel()
 		d.recorder = nil
 		_ = os.Remove(d.recordingPath)
+		d.invalidateOperation()
 		d.setPhase(protocol.PhaseIdle, "", "")
 		return "Recording cancelled", nil
 	case protocol.PhaseTranscribing, protocol.PhasePasting:
-		d.stateMu.Lock()
-		d.cancelled = true
-		d.stateMu.Unlock()
+		d.invalidateOperation()
 		d.setPhase(protocol.PhaseIdle, "", "cancelled by user")
 		return "Transcription cancelled", nil
 	default:
@@ -294,9 +296,6 @@ func (d *Daemon) Cancel() (string, *protocol.Error) {
 }
 
 func (d *Daemon) startRecording() (string, *protocol.Error) {
-	d.stateMu.Lock()
-	d.cancelled = false
-	d.stateMu.Unlock()
 	if !d.micOK() {
 		return "", protocol.NewError(protocol.ErrNotReady, protocol.ClassService,
 			"parecord is not installed; install pulseaudio-utils and re-run sasayaki setup")
@@ -310,13 +309,17 @@ func (d *Daemon) startRecording() (string, *protocol.Error) {
 	d.recorder = rec
 	d.recordingPath = path
 	d.recordingStart = time.Now()
+	d.stateMu.Lock()
+	d.generation++
+	d.recordingGeneration = d.generation
+	d.stateMu.Unlock()
 	d.setPhase(protocol.PhaseRecording, "", "")
 	d.log.Info("recording started")
 	return "Recording — press the shortcut again when you are done", nil
 }
 
 func (d *Daemon) finishRecording() (string, *protocol.Error) {
-	rec, path := d.recorder, d.recordingPath
+	rec, path, generation := d.recorder, d.recordingPath, d.recordingGeneration
 	d.recorder = nil
 	duration, err := rec.Stop()
 	if err != nil {
@@ -334,77 +337,99 @@ func (d *Daemon) finishRecording() (string, *protocol.Error) {
 	d.log.Info("recording finished", "duration", duration.String())
 
 	// Transcription runs asynchronously so the socket returns promptly.
-	go d.runTranscription(path)
+	go d.runTranscription(path, generation)
 	return "Recording stopped — transcribing…", nil
 }
 
 // runTranscription executes the transcribe → paste pipeline and records the
 // final phase. It must be called with d.opMu released.
-func (d *Daemon) runTranscription(path string) {
+func (d *Daemon) runTranscription(path string, generation uint64) {
 	d.opMu.Lock()
+	if !d.currentOperation(generation) {
+		d.opMu.Unlock()
+		_ = os.Remove(path)
+		return
+	}
 	d.setPhase(protocol.PhaseTranscribing, "", "")
 	d.opMu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), transcribeTimeout)
 	defer cancel()
 
-	if d.isCancelled() {
+	if !d.currentOperation(generation) {
 		_ = os.Remove(path)
 		return
 	}
 	if err := d.transcriber.EnsureWarm(ctx); err != nil {
-		d.fail(path, protocol.ErrModelFailed, "model engine is not ready: "+err.Error())
+		d.fail(path, generation, protocol.ErrModelFailed, "model engine is not ready: "+err.Error())
 		return
 	}
-	if d.isCancelled() {
+	if !d.currentOperation(generation) {
 		_ = os.Remove(path)
 		return
 	}
 	text, err := d.transcriber.Transcribe(ctx, path)
 	if err != nil {
-		d.fail(path, protocol.ErrModelFailed, "transcription failed: "+err.Error())
+		d.fail(path, generation, protocol.ErrModelFailed, "transcription failed: "+err.Error())
 		return
 	}
 	if strings.TrimSpace(text) == "" {
-		d.fail(path, protocol.ErrEmptySpeech, "no speech detected in the recording")
+		d.fail(path, generation, protocol.ErrEmptySpeech, "no speech detected in the recording")
 		return
 	}
 	d.logMeta("transcribed", len(text))
 	if d.cfg.VerboseTranscripts {
 		d.log.Info("transcript", "text", text)
 	}
-	if d.isCancelled() {
+	if !d.currentOperation(generation) {
 		_ = os.Remove(path)
 		return
 	}
 
 	d.opMu.Lock()
+	if !d.currentOperation(generation) {
+		d.opMu.Unlock()
+		_ = os.Remove(path)
+		return
+	}
 	d.setPhase(protocol.PhasePasting, "", "")
 	d.opMu.Unlock()
-	if d.isCancelled() {
+	if !d.currentOperation(generation) {
 		_ = os.Remove(path)
 		return
 	}
 
 	result := d.paster.Paste(strings.TrimSpace(text))
+	if !d.currentOperation(generation) {
+		return
+	}
 	if result.Pasted {
 		d.opMu.Lock()
-		d.setPhase(protocol.PhaseSucceeded, truncate(text), "")
+		if d.currentOperation(generation) {
+			d.setPhase(protocol.PhaseSucceeded, truncate(text), "")
+		}
 		d.log.Info("paste succeeded", "backend", result.Backend)
 		d.opMu.Unlock()
 		return
 	}
 	// Truthful fallback: the text is on the clipboard but was not injected.
 	d.opMu.Lock()
-	d.setPhase(protocol.PhaseFailed, truncate(text), result.Detail)
+	if d.currentOperation(generation) {
+		d.setPhase(protocol.PhaseFailed, truncate(text), result.Detail)
+	}
 	d.opMu.Unlock()
 	d.log.Warn("paste did not reach the focused app", "detail", result.Detail)
 }
 
-func (d *Daemon) fail(path, code, detail string) {
+func (d *Daemon) fail(path string, generation uint64, code, detail string) {
 	_ = os.Remove(path)
+	if !d.currentOperation(generation) {
+		return
+	}
 	d.opMu.Lock()
-	d.setPhase(protocol.PhaseFailed, "", detail)
+	if d.currentOperation(generation) {
+		d.setPhase(protocol.PhaseFailed, "", detail)
+	}
 	d.opMu.Unlock()
 	d.log.Warn("operation failed", "code", code, "detail", detail)
 }
@@ -424,10 +449,16 @@ func (d *Daemon) setPhase(phase protocol.Phase, result, lastErr string) {
 	}
 }
 
-func (d *Daemon) isCancelled() bool {
+func (d *Daemon) currentOperation(generation uint64) bool {
 	d.stateMu.Lock()
 	defer d.stateMu.Unlock()
-	return d.cancelled
+	return d.generation == generation
+}
+
+func (d *Daemon) invalidateOperation() {
+	d.stateMu.Lock()
+	d.generation++
+	d.stateMu.Unlock()
 }
 
 // logMeta logs operation metadata without private text.

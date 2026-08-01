@@ -444,6 +444,38 @@ func TestCancelWhileTranscribing(t *testing.T) {
 	}
 }
 
+func TestCancelledTranscriptionCannotPasteAfterNextRecordingStarts(t *testing.T) {
+	paths := testPaths(t)
+	d, _, tr, pa := testDaemon(t, paths)
+	tr.block = make(chan struct{})
+
+	if _, perr := d.Toggle(); perr != nil {
+		t.Fatal(perr)
+	}
+	if _, perr := d.Toggle(); perr != nil {
+		t.Fatal(perr)
+	}
+	waitFor(t, "transcribing phase", func() bool { return d.State().Phase == protocol.PhaseTranscribing })
+	if _, perr := d.Cancel(); perr != nil {
+		t.Fatal(perr)
+	}
+	// Begin the next clip before the old model request is allowed to return.
+	if _, perr := d.Toggle(); perr != nil {
+		t.Fatalf("start next recording: %v", perr)
+	}
+	if got := d.State().Phase; got != protocol.PhaseRecording {
+		t.Fatalf("phase = %s, want recording", got)
+	}
+	close(tr.block)
+	time.Sleep(50 * time.Millisecond)
+	if got := len(pa.pastedTexts()); got != 0 {
+		t.Fatalf("cancelled old result must not paste, got %v", pa.pastedTexts())
+	}
+	if got := d.State().Phase; got != protocol.PhaseRecording {
+		t.Fatalf("late old result changed next recording state to %s", got)
+	}
+}
+
 func TestCancelWhenIdle(t *testing.T) {
 	d, _, _, _ := testDaemon(t, testPaths(t))
 	msg, perr := d.Cancel()
