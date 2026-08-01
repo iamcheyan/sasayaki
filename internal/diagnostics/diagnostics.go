@@ -79,7 +79,11 @@ func toolCheck(r Runner, tool, purpose, fix string) Check {
 }
 
 func systemdCheck(r Runner) Check {
-	out, err := r.Run("systemctl", "--user", "is-system-running")
+	// `is-system-running` deliberately exits non-zero for a *degraded*
+	// manager. A degraded user session can still start and supervise
+	// Sasayaki perfectly well, so use a neutral manager query instead.
+	// This avoids blocking setup because an unrelated user unit failed.
+	out, err := r.Run("systemctl", "--user", "show-environment")
 	if err != nil {
 		return Check{
 			Name:   "systemd user session",

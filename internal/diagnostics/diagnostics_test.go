@@ -102,6 +102,34 @@ func TestDiagnosticsToolChecksPass(t *testing.T) {
 	}
 }
 
+func TestSystemdCheckUsesNeutralManagerQuery(t *testing.T) {
+	var got []string
+	runner := recordingRunner{run: func(name string, args ...string) ([]byte, error) {
+		got = append([]string{name}, args...)
+		if name == "pactl" {
+			return []byte(pactlListing), nil
+		}
+		return nil, nil
+	}}
+	check := systemdCheck(runner)
+	if !check.OK {
+		t.Fatalf("neutral systemd query should succeed: %+v", check)
+	}
+	want := []string{"systemctl", "--user", "show-environment"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("systemd argv = %q, want %q", got, want)
+	}
+}
+
+type recordingRunner struct {
+	run func(name string, args ...string) ([]byte, error)
+}
+
+func (r recordingRunner) LookPath(name string) (string, error) { return "/usr/bin/" + name, nil }
+func (r recordingRunner) Run(name string, args ...string) ([]byte, error) {
+	return r.run(name, args...)
+}
+
 func TestDiagnosticsModelSuggestsSetup(t *testing.T) {
 	p := testPaths(t)
 	report := AllWith(stubRunner{present: map[string]bool{"python3": true}}, p)
