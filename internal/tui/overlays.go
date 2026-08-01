@@ -1,9 +1,11 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/iamcheyan/sasayaki/internal/transcribe"
 )
 
 // overlayView renders the active overlay (or the plain content when none).
@@ -45,12 +47,17 @@ func (m Model) overlayView(content string) string {
 func (m Model) modelsBox() string {
 	var b strings.Builder
 	b.WriteString(m.boxTitle("Local speech model") + "\n\n")
-	b.WriteString("  " + m.theme.base().Foreground(m.theme.focus).Bold(true).Render("1") + "  SenseVoice Small · int8 · 229 MB\n")
-	b.WriteString("     Fast, compact, recommended for most laptops.\n\n")
-	b.WriteString("  " + m.theme.base().Foreground(m.theme.focus).Bold(true).Render("2") + "  SenseVoice Small · full precision · 894 MB\n")
-	b.WriteString("     Higher precision, larger download and memory use.\n\n")
-	b.WriteString("  Choose a model, then press S to download/verify it and\n")
-	b.WriteString("  restart the voice service. Esc closes this chooser.\n")
+	for i, model := range transcribe.SpeechModels {
+		number := fmt.Sprintf("%d", i+1)
+		installed := "not downloaded"
+		if transcribe.ModelValidFor(m.paths, model.ID) {
+			installed = "installed"
+		}
+		b.WriteString("  " + m.theme.base().Foreground(m.theme.focus).Bold(true).Render(number) + "  " + model.Label + "\n")
+		b.WriteString("     " + model.Description + " [" + installed + "]\n\n")
+	}
+	b.WriteString("  Choosing an absent model downloads, verifies, and activates it.\n")
+	b.WriteString("  Esc closes this chooser.\n")
 	return b.String()
 }
 

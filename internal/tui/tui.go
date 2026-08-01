@@ -47,8 +47,9 @@ type toggleMsg struct {
 type noticeMsg struct{ text string }
 
 type modelChoiceMsg struct {
-	label string
-	err   error
+	label     string
+	installed bool
+	err       error
 }
 
 type setupProgressMsg struct{ line string }
@@ -170,9 +171,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case modelChoiceMsg:
 		if msg.err != nil {
 			m.showNotice("Could not select model: " + msg.err.Error())
-		} else {
-			m.showNotice("Selected " + msg.label + " — press S to download/apply it")
+			return m, nil
 		}
+		m.overlay = overlayNone
+		if !msg.installed {
+			m.showNotice("Downloading " + msg.label)
+			return m.startSetup()
+		}
+		m.showNotice("Selected " + msg.label + " — already verified")
 		return m, nil
 
 	case setupProgressMsg:
@@ -252,6 +258,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, selectModelCmd(m.paths, "sensevoice-int8")
 			case "2":
 				return m, selectModelCmd(m.paths, "sensevoice-full")
+			case "3":
+				return m, selectModelCmd(m.paths, "paraformer-zh-int8")
 			case "esc", "m", "M":
 				m.overlay = overlayNone
 			}
@@ -462,7 +470,7 @@ func selectModelCmd(paths config.Paths, id string) tea.Cmd {
 		if err := config.Save(paths, cfg); err != nil {
 			return modelChoiceMsg{err: err}
 		}
-		return modelChoiceMsg{label: selected.Label}
+		return modelChoiceMsg{label: selected.Label, installed: transcribe.ModelValidFor(paths, selected.ID)}
 	}
 }
 
