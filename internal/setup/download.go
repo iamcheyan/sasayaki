@@ -49,7 +49,26 @@ func downloadFile(url, destination, wantSHA string) error {
 	defer resp.Body.Close()
 
 	switch resp.StatusCode {
-	case http.StatusOK, http.StatusPartialContent:
+	case http.StatusOK:
+		// A number of CDNs ignore Range requests. Appending a full response to
+		// an existing partial file makes the checksum mismatch forever. Start
+		// over safely when that happens; the known-good destination is still
+		// untouched until this new .part verifies.
+		if offset > 0 {
+			if err := out.Truncate(0); err != nil {
+				out.Close()
+				return err
+			}
+			if _, err := out.Seek(0, io.SeekStart); err != nil {
+				out.Close()
+				return err
+			}
+		}
+		if _, err := io.Copy(out, resp.Body); err != nil {
+			out.Close()
+			return fmt.Errorf("downloading %s: %w", url, err)
+		}
+	case http.StatusPartialContent:
 		if _, err := io.Copy(out, resp.Body); err != nil {
 			out.Close()
 			return fmt.Errorf("downloading %s: %w", url, err)
@@ -69,6 +88,9 @@ func downloadFile(url, destination, wantSHA string) error {
 		return err
 	}
 	if sum != wantSHA {
+		// Do not preserve a known-corrupt prefix: a subsequent resume would
+		// append to it and could never produce a valid model file.
+		_ = os.Remove(part)
 		return fmt.Errorf("checksum mismatch for %s: download is corrupt; re-run `sasayaki setup` to retry", filepath.Base(destination))
 	}
 	return nil

@@ -353,6 +353,46 @@ func TestDownloadResume(t *testing.T) {
 	}
 }
 
+func TestDownloadRestartsWhenServerIgnoresRange(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "model.onnx")
+	body := []byte("0123456789abcdef")
+	want := sha256Hex(body)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Intentionally return 200 even when Range is supplied, as some
+		// redirects/CDNs do. The downloader must replace, not append to, .part.
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+	if err := os.WriteFile(dest+".part", body[:5], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	downloadClient = &http.Client{}
+	if err := downloadFile(server.URL, dest, want); err != nil {
+		t.Fatalf("ignored-range download should restart cleanly: %v", err)
+	}
+	got, err := os.ReadFile(dest + ".part")
+	if err != nil || string(got) != string(body) {
+		t.Fatalf("restarted .part = %q, err %v", got, err)
+	}
+}
+
+func TestDownloadChecksumFailureDiscardsCorruptPart(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "model.onnx")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("wrong bytes"))
+	}))
+	defer server.Close()
+	downloadClient = &http.Client{}
+	if err := downloadFile(server.URL, dest, strings.Repeat("a", 64)); err == nil {
+		t.Fatal("checksum mismatch should fail")
+	}
+	if _, err := os.Stat(dest + ".part"); !os.IsNotExist(err) {
+		t.Fatalf("known-corrupt partial download should be removed, err=%v", err)
+	}
+}
+
 func TestDownloadRangeNotSatisfiableVerifies(t *testing.T) {
 	dir := t.TempDir()
 	dest := filepath.Join(dir, "model.onnx")
