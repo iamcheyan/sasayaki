@@ -129,7 +129,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		interval := 2 * time.Second
 		if m.state != nil {
 			switch m.state.Phase {
-			case protocol.PhaseRecording, protocol.PhaseTranscribing, protocol.PhasePasting:
+			case protocol.PhaseRecording, protocol.PhaseTranscribing, protocol.PhaseTranslating, protocol.PhasePasting:
 				interval = 500 * time.Millisecond
 			}
 		}

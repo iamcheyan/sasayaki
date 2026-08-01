@@ -53,6 +53,8 @@ func main() {
 		os.Exit(code)
 	case "models":
 		os.Exit(runModels(paths, args[1:]))
+	case "translation":
+		os.Exit(runTranslation(paths, args[1:]))
 	case "service":
 		os.Exit(runServiceCommand(args[1:]))
 	case "shortcut":
@@ -219,6 +221,48 @@ func runModels(paths config.Paths, args []string) int {
 	return exitOK
 }
 
+func runTranslation(paths config.Paths, args []string) int {
+	cfg, err := config.Load(paths)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "sasayaki:", err)
+		return exitError
+	}
+	if len(args) == 0 || (len(args) == 1 && args[0] == "status") {
+		t := cfg.Translation
+		fmt.Printf("translation: %t\nendpoint: %s\nmodel: %s\ntarget: %s\napi key: %t\n", t.Enabled, t.BaseURL, t.Model, t.TargetLanguage, t.APIKey != "")
+		return exitOK
+	}
+	if len(args) == 1 && args[0] == "disable" {
+		cfg.Translation.Enabled = false
+		if err := config.Save(paths, cfg); err != nil {
+			fmt.Fprintln(os.Stderr, "sasayaki:", err)
+			return exitError
+		}
+		fmt.Println("Translation disabled.")
+		return exitOK
+	}
+	if len(args) > 0 && args[0] == "configure" {
+		flags := flag.NewFlagSet("translation configure", flag.ContinueOnError)
+		baseURL := flags.String("base-url", cfg.Translation.BaseURL, "OpenAI-compatible base URL")
+		model := flags.String("model", cfg.Translation.Model, "translation model")
+		target := flags.String("target", cfg.Translation.TargetLanguage, "target language")
+		key := flags.String("api-key", cfg.Translation.APIKey, "API key (stored in Sasayaki private config)")
+		enabled := flags.Bool("enabled", true, "enable translation")
+		if err := flags.Parse(args[1:]); err != nil {
+			return exitUsage
+		}
+		cfg.Translation = config.TranslationConfig{Enabled: *enabled, BaseURL: *baseURL, Model: *model, TargetLanguage: *target, APIKey: *key}
+		if err := config.Save(paths, cfg); err != nil {
+			fmt.Fprintln(os.Stderr, "sasayaki:", err)
+			return exitError
+		}
+		fmt.Println("Translation configuration saved. New recordings will translate before pasting.")
+		return exitOK
+	}
+	fmt.Fprintln(os.Stderr, "sasayaki: usage: sasayaki translation [status|disable|configure --base-url URL --model ID --target LANGUAGE --api-key KEY]")
+	return exitUsage
+}
+
 func runServiceCommand(args []string) int {
 	if len(args) != 1 {
 		fmt.Fprintln(os.Stderr, "sasayaki: usage: sasayaki service <start|stop|restart|status>")
@@ -277,6 +321,7 @@ Usage:
   sasayaki status [--json]      Show service and readiness state
   sasayaki diagnose [--json]    Full dependency and capability report
   sasayaki models [select ID]  List/select a local speech model
+  sasayaki translation …       Configure optional online translation
   sasayaki service start|stop|restart|status
   sasayaki shortcut             Show desktop shortcut instructions
   sasayaki logs                 Follow the user-service log

@@ -25,6 +25,7 @@ import (
 	"github.com/iamcheyan/sasayaki/internal/protocol"
 	"github.com/iamcheyan/sasayaki/internal/recording"
 	"github.com/iamcheyan/sasayaki/internal/transcribe"
+	"github.com/iamcheyan/sasayaki/internal/translate"
 )
 
 // UnitName is the systemd user unit owned by Sasayaki.
@@ -240,6 +241,7 @@ func (d *Daemon) State() *protocol.State {
 		Runtime:      transcribe.InstalledFor(d.paths, d.cfg.SpeechModel),
 		Model:        transcribe.ModelValidFor(d.paths, d.cfg.SpeechModel),
 		SpeechModel:  d.cfg.SpeechModel,
+		Translation:  translationState(d.cfg.Translation),
 		Microphone:   d.micOK(),
 		Paste:        paste.AvailableDefault(),
 		PasteBackend: paste.BestBackend(paste.DefaultRunner()),
@@ -386,6 +388,23 @@ func (d *Daemon) runTranscription(path string, generation uint64) {
 		_ = os.Remove(path)
 		return
 	}
+	if d.cfg.Translation.Enabled {
+		d.opMu.Lock()
+		if d.currentOperation(generation) {
+			d.setPhase(protocol.PhaseTranslating, "", "")
+		}
+		d.opMu.Unlock()
+		translated, err := translate.Translate(ctx, d.cfg.Translation, strings.TrimSpace(text))
+		if err != nil {
+			d.fail(path, generation, protocol.ErrModelFailed, "translation failed: "+err.Error())
+			return
+		}
+		if !d.currentOperation(generation) {
+			_ = os.Remove(path)
+			return
+		}
+		text = translated
+	}
 
 	d.opMu.Lock()
 	if !d.currentOperation(generation) {
@@ -420,6 +439,16 @@ func (d *Daemon) runTranscription(path string, generation uint64) {
 	}
 	d.opMu.Unlock()
 	d.log.Warn("paste did not reach the focused app", "detail", result.Detail)
+}
+
+func translationState(c config.TranslationConfig) string {
+	if !c.Enabled {
+		return "disabled"
+	}
+	if ok, _ := translate.Ready(c); ok {
+		return "ready"
+	}
+	return "misconfigured"
 }
 
 func (d *Daemon) fail(path string, generation uint64, code, detail string) {

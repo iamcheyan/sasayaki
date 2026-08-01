@@ -52,6 +52,8 @@ func (m Model) pill() string {
 		label, color = dot+" TRANSCRIBING", m.theme.violet
 	case m.state.Phase == protocol.PhasePasting:
 		label, color = dot+" PASTING", m.theme.violet
+	case m.state.Phase == protocol.PhaseTranslating:
+		label, color = dot+" TRANSLATING", m.theme.violet
 	case m.state.Phase == protocol.PhaseFailed:
 		label, color = dot+" ERROR", m.theme.danger
 	case !m.state.Model || !m.state.Runtime:
@@ -139,8 +141,8 @@ func (m Model) runtimeCard() string {
 	b.WriteString("  " + m.serviceLine() + "\n\n")
 	b.WriteString(m.section("LOCAL ENGINE", false))
 	b.WriteString("  " + m.engineLine() + "\n\n")
-	b.WriteString(m.section("INPUT", false))
-	b.WriteString("  " + m.inputLine() + "\n\n")
+	b.WriteString(m.section("TRANSLATION", false))
+	b.WriteString("  " + m.translationLine() + "\n\n")
 	b.WriteString(m.section("ACTIONS", false))
 	b.WriteString("  " + m.actionLine(focusSetup, "setup") + "\n")
 	b.WriteString("  " + m.actionLine(focusDiagnose, "diagnose") + "\n")
@@ -178,6 +180,8 @@ func (m Model) recordingLine() string {
 		return m.dot(m.theme.violet) + " Transcribing…"
 	case protocol.PhasePasting:
 		return m.dot(m.theme.violet) + " Pasting…"
+	case protocol.PhaseTranslating:
+		return m.dot(m.theme.violet) + " Translating…"
 	case protocol.PhaseSucceeded:
 		return m.dot(m.theme.mint) + " Ready to listen"
 	case protocol.PhaseFailed:
@@ -270,6 +274,16 @@ func (m Model) inputLine() string {
 		backend = "none"
 	}
 	return mic + " mic   " + paste + " paste (" + backend + ")"
+}
+
+func (m Model) translationLine() string {
+	if m.state == nil || m.state.Translation == "disabled" {
+		return m.theme.base().Foreground(m.theme.muted).Render("○ Off — configure with CLI")
+	}
+	if m.state.Translation == "ready" {
+		return m.dot(m.theme.mint) + " Online model ready"
+	}
+	return m.dot(m.theme.amber) + " Needs configuration"
 }
 
 func (m Model) mark(ok bool) string {

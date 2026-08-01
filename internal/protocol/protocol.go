@@ -95,6 +95,7 @@ const (
 	PhaseRecording    Phase = "recording"
 	PhaseTranscribing Phase = "transcribing"
 	PhasePasting      Phase = "pasting"
+	PhaseTranslating  Phase = "translating"
 	PhaseSucceeded    Phase = "succeeded"
 	PhaseFailed       Phase = "failed"
 )
@@ -120,6 +121,7 @@ type State struct {
 	Runtime      bool   `json:"runtime"`
 	Model        bool   `json:"model"`
 	SpeechModel  string `json:"speech_model,omitempty"`
+	Translation  string `json:"translation,omitempty"`
 	Microphone   bool   `json:"microphone"`
 	Paste        bool   `json:"paste"`
 	PasteBackend string `json:"paste_backend,omitempty"`
