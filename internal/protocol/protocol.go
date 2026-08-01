@@ -36,13 +36,14 @@ const (
 	ErrAlreadyRecording  = "already_recording"
 
 	// Service/execution errors.
-	ErrMicrophoneFailed = "microphone_failed"
-	ErrTooShort         = "too_short"
-	ErrEmptySpeech      = "empty_speech"
-	ErrModelFailed      = "model_failed"
-	ErrPasteFailed      = "paste_failed"
-	ErrNotReady         = "not_ready"
-	ErrInternal         = "internal"
+	ErrMicrophoneFailed  = "microphone_failed"
+	ErrTooShort          = "too_short"
+	ErrEmptySpeech       = "empty_speech"
+	ErrModelFailed       = "model_failed"
+	ErrTranslationFailed = "translation_failed"
+	ErrPasteFailed       = "paste_failed"
+	ErrNotReady          = "not_ready"
+	ErrInternal          = "internal"
 )
 
 // ErrorClass tells a client whether an error is a predictable user-action

@@ -60,6 +60,35 @@ sasayaki shortcut        Show desktop-specific shortcut instructions
 sasayaki logs            Follow the user-service log
 ```
 
+## Models, translation and repair
+
+Sasayaki detects the selected local speech model before it records. Choose a
+compact or full-precision local model, then run setup to download, verify and
+activate it:
+
+```sh
+sasayaki models
+sasayaki models select sensevoice-full
+sasayaki setup
+```
+
+Optional translation runs only after local speech recognition. It works with
+an OpenAI-compatible endpoint and is completely independent of OpenCode or
+the desktop environment:
+
+```sh
+sasayaki translation configure \
+  --base-url https://example.com/v1 \
+  --model your-fast-model \
+  --target Japanese \
+  --api-key "$YOUR_API_KEY"
+sasayaki translation test "hello"
+```
+
+Run `sasayaki repair` to re-check local tools, repair the selected runtime and
+model, and restart the user service. `sasayaki diagnose` is read-only and
+lists every failed check with a remediation.
+
 Exit codes are predictable for scripting: `0` success, `1` operational
 failure (service down, setup incomplete, empty recording, …), `2` usage
 error.

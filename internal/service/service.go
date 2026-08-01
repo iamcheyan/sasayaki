@@ -396,7 +396,7 @@ func (d *Daemon) runTranscription(path string, generation uint64) {
 		d.opMu.Unlock()
 		translated, err := translate.Translate(ctx, d.cfg.Translation, strings.TrimSpace(text))
 		if err != nil {
-			d.fail(path, generation, protocol.ErrModelFailed, "translation failed: "+err.Error())
+			d.fail(path, generation, protocol.ErrTranslationFailed, "translation failed: "+err.Error())
 			return
 		}
 		if !d.currentOperation(generation) {
