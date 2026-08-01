@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/iamcheyan/sasayaki/internal/config"
+	"github.com/iamcheyan/sasayaki/internal/protocol"
 )
 
 func testPaths(t *testing.T) config.Paths {
@@ -91,17 +92,11 @@ func TestMoveFocusHorizontal(t *testing.T) {
 	cases := []struct {
 		dir, from, want string
 	}{
-		// VOICE → RUNTIME at the same row.
-		{"right", "record", "setup"},
-		{"right", "shortcut", "diagnose"},
-		// RUNTIME → VOICE at the same row.
-		{"left", "setup", "record"},
-		{"left", "diagnose", "shortcut"},
-		// RUNTIME rows 3+ clamp to the last VOICE row.
-		{"left", "logs", "shortcut"},
-		// Right from RUNTIME wraps to VOICE (same row, clamped).
-		{"right", "setup", "record"},
-		{"right", "logs", "shortcut"},
+		{"right", "model", "record"},
+		{"right", "setup", "logs"},
+		{"left", "record", "model"},
+		{"left", "logs", "setup"},
+		{"right", "diagnose", "logs"},
 	}
 	for _, c := range cases {
 		from := focusID(c.from)
@@ -114,24 +109,24 @@ func TestMoveFocusHorizontal(t *testing.T) {
 
 func TestMoveFocusVerticalWraps(t *testing.T) {
 	// Up from the top row wraps to the bottom of the same card.
-	if got := moveFocus("up", focusRecord); got != focusShortcut {
+	if got := moveFocus("up", focusModel); got != focusDiagnose {
+		t.Fatalf("up from model = %s", focusName(got))
+	}
+	if got := moveFocus("up", focusRecord); got != focusLogs {
 		t.Fatalf("up from record = %s", focusName(got))
 	}
-	if got := moveFocus("up", focusSetup); got != focusLogs {
-		t.Fatalf("up from setup = %s", focusName(got))
-	}
 	// Down from the last row wraps to the top.
-	if got := moveFocus("down", focusShortcut); got != focusRecord {
-		t.Fatalf("down from shortcut = %s", focusName(got))
+	if got := moveFocus("down", focusDiagnose); got != focusModel {
+		t.Fatalf("down from diagnose = %s", focusName(got))
 	}
-	if got := moveFocus("down", focusLogs); got != focusSetup {
+	if got := moveFocus("down", focusLogs); got != focusRecord {
 		t.Fatalf("down from logs = %s", focusName(got))
 	}
 }
 
 func TestMoveFocusTabCycles(t *testing.T) {
-	want := []int{focusShortcut, focusSetup, focusDiagnose, focusLogs, focusRecord}
-	cur := focusRecord
+	want := []int{focusSetup, focusDiagnose, focusRecord, focusLogs, focusModel}
+	cur := focusModel
 	for _, w := range want {
 		cur = moveFocus("tab", cur)
 		if cur != w {
@@ -141,15 +136,15 @@ func TestMoveFocusTabCycles(t *testing.T) {
 }
 
 func TestCardAndRowMapping(t *testing.T) {
-	if cardOf(focusRecord) != 0 || cardOf(focusShortcut) != 0 {
-		t.Fatal("record/shortcut belong to VOICE")
+	if cardOf(focusModel) != 0 || cardOf(focusSetup) != 0 || cardOf(focusDiagnose) != 0 {
+		t.Fatal("model/setup/diagnose belong to CONFIGURE")
 	}
-	for _, f := range []int{focusSetup, focusDiagnose, focusLogs} {
+	for _, f := range []int{focusRecord, focusLogs} {
 		if cardOf(f) != 1 {
-			t.Fatalf("focus %s should belong to RUNTIME", focusName(f))
+			t.Fatalf("focus %s should belong to LIVE", focusName(f))
 		}
 	}
-	if focusFor(0, 1) != focusShortcut || focusFor(1, 2) != focusLogs {
+	if focusFor(0, 1) != focusSetup || focusFor(1, 1) != focusLogs {
 		t.Fatal("focusFor mapping broken")
 	}
 }
@@ -167,6 +162,19 @@ func TestCardFrameHasBorderLegendAndFixedHeight(t *testing.T) {
 	}
 }
 
+func TestMainScreenSeparatesConfigurationAndLiveSession(t *testing.T) {
+	m := New(testPaths(t))
+	m.width, m.height = 120, 40
+	m.layout = computeLayout(m.width, m.height)
+	m.state = &protocol.State{Service: protocol.ServiceRunning, Runtime: true, Model: true, SpeechModel: "paraformer-zh-int8", Language: "zh"}
+	view := m.View()
+	for _, want := range []string{"CONFIGURE", "LIVE", "LOCAL MODEL", "Paraformer Large", "LANGUAGE & TRANSLATION", "LAST RESULT", "ACTIVITY"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("main screen missing %q:\n%s", want, view)
+		}
+	}
+}
+
 func TestTruncatePlainKeepsUTF8Valid(t *testing.T) {
 	got := truncatePlain("こんにちは世界", 5)
 	if got != "こん…" {
@@ -178,14 +186,14 @@ func TestTruncatePlainKeepsUTF8Valid(t *testing.T) {
 
 func focusID(name string) int {
 	switch name {
-	case "record":
-		return focusRecord
-	case "shortcut":
-		return focusShortcut
+	case "model":
+		return focusModel
 	case "setup":
 		return focusSetup
 	case "diagnose":
 		return focusDiagnose
+	case "record":
+		return focusRecord
 	case "logs":
 		return focusLogs
 	}
@@ -194,14 +202,14 @@ func focusID(name string) int {
 
 func focusName(f int) string {
 	switch f {
-	case focusRecord:
-		return "record"
-	case focusShortcut:
-		return "shortcut"
+	case focusModel:
+		return "model"
 	case focusSetup:
 		return "setup"
 	case focusDiagnose:
 		return "diagnose"
+	case focusRecord:
+		return "record"
 	case focusLogs:
 		return "logs"
 	}

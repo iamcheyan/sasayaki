@@ -122,6 +122,7 @@ type State struct {
 	Runtime      bool   `json:"runtime"`
 	Model        bool   `json:"model"`
 	SpeechModel  string `json:"speech_model,omitempty"`
+	Language     string `json:"language,omitempty"`
 	Translation  string `json:"translation,omitempty"`
 	Microphone   bool   `json:"microphone"`
 	Paste        bool   `json:"paste"`

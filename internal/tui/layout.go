@@ -1,22 +1,22 @@
 package tui
 
-// Focus targets are ordered as [VOICE: record, VOICE: shortcut,
-// RUNTIME: setup, RUNTIME: diagnose, RUNTIME: logs].
+// Focus targets are ordered as [CONFIGURE: model, setup, diagnose,
+// LIVE: record, logs]. Arrow navigation stays spatial across both cards.
 const (
-	focusRecord = iota
-	focusShortcut
+	focusModel = iota
 	focusSetup
 	focusDiagnose
+	focusRecord
 	focusLogs
 	focusCount
 )
 
-// voiceFocuses is the number of focusable rows in the VOICE card.
-const voiceFocuses = 2
+// configureFocuses is the number of focusable rows in the left card.
+const configureFocuses = 3
 
 // cardOf returns the card index (0 = VOICE, 1 = RUNTIME) for a focus id.
 func cardOf(focus int) int {
-	if focus < voiceFocuses {
+	if focus < configureFocuses {
 		return 0
 	}
 	return 1
@@ -24,18 +24,18 @@ func cardOf(focus int) int {
 
 // rowOf returns the row index within the card for a focus id.
 func rowOf(focus int) int {
-	if focus < voiceFocuses {
+	if focus < configureFocuses {
 		return focus
 	}
-	return focus - voiceFocuses
+		return focus - configureFocuses
 }
 
 // rowsIn returns the number of focusable rows in a card.
 func rowsIn(card int) int {
 	if card == 0 {
-		return voiceFocuses
+		return configureFocuses
 	}
-	return focusCount - voiceFocuses
+	return focusCount - configureFocuses
 }
 
 // moveFocus applies one spatial navigation step from current and returns
@@ -46,8 +46,8 @@ func moveFocus(dir string, current int) int {
 	case "left":
 		if cardOf(current) == 1 {
 			row := rowOf(current)
-			if row >= voiceFocuses {
-				row = voiceFocuses - 1
+			if row >= configureFocuses {
+				row = configureFocuses - 1
 			}
 			return focusFor(0, row)
 		}
@@ -69,8 +69,8 @@ func moveFocus(dir string, current int) int {
 		}
 		// Wrap to the VOICE card.
 		row := rowOf(current)
-		if row >= voiceFocuses {
-			row = voiceFocuses - 1
+		if row >= configureFocuses {
+			row = configureFocuses - 1
 		}
 		return focusFor(0, row)
 	case "up":
@@ -96,7 +96,7 @@ func focusFor(card, row int) int {
 	if card == 0 {
 		return row
 	}
-	return voiceFocuses + row
+	return configureFocuses + row
 }
 
 // layout computes the card geometry for a terminal size. It is pure so the

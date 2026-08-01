@@ -6,6 +6,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/iamcheyan/sasayaki/internal/protocol"
+	"github.com/iamcheyan/sasayaki/internal/transcribe"
 )
 
 // View renders the full screen: header, cards, footer.
@@ -62,14 +63,15 @@ func (m Model) pill() string {
 	return m.theme.base().Foreground(color).Bold(true).Render(label)
 }
 
-// cards renders the VOICE / RUNTIME cards side by side or stacked.
+// cards renders configuration beside the live session. The two cards have
+// equal geometry so the screen stays calm at every supported terminal size.
 func (m Model) cards() string {
-	voice := m.voiceCard()
-	runtime := m.runtimeCard()
+	configure := m.configureCard()
+	live := m.liveCard()
 	if m.layout.sideBySide {
-		return lipgloss.JoinHorizontal(lipgloss.Top, voice, strings.Repeat(" ", 2), runtime)
+		return lipgloss.JoinHorizontal(lipgloss.Top, configure, strings.Repeat(" ", 2), live)
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, voice, "\n", runtime)
+	return lipgloss.JoinVertical(lipgloss.Left, configure, "\n", live)
 }
 
 // cardFrame wraps a body in a thin rounded border with a title on the edge.
@@ -113,41 +115,45 @@ func (m Model) cardFrame(title, body string) string {
 	return b.String()
 }
 
-// focusCard returns "VOICE" or "RUNTIME" depending on which card holds the
+// focusCard returns the card title depending on which card holds the
 // current focus target.
 func (m Model) focusCard() string {
 	if cardOf(m.focus) == 0 {
-		return "VOICE"
+		return "CONFIGURE"
 	}
-	return "RUNTIME"
+	return "LIVE"
 }
 
-func (m Model) voiceCard() string {
+func (m Model) configureCard() string {
+	var b strings.Builder
+	b.WriteString(m.section("LOCAL MODEL", m.focus == focusModel))
+	b.WriteString("  " + m.modelLine() + "\n")
+	b.WriteString("  " + m.modelDetail() + "\n")
+	b.WriteString("  " + m.actionLine(focusModel, "change or download  [m]") + "\n\n")
+	b.WriteString(m.section("LANGUAGE & TRANSLATION", false))
+	b.WriteString("  recognition   " + m.languageLine() + "\n")
+	b.WriteString("  translation   " + m.translationLine() + "\n\n")
+	b.WriteString(m.section("SYSTEM", false))
+	b.WriteString("  " + m.actionLine(focusSetup, "repair runtime and service  [r]") + "\n")
+	b.WriteString("  " + m.actionLine(focusDiagnose, "inspect all checks  [d]"))
+	return m.cardFrame("CONFIGURE", b.String())
+}
+
+func (m Model) liveCard() string {
 	var b strings.Builder
 	b.WriteString(m.section("RECORDING", m.focus == focusRecord))
-	b.WriteString("  " + m.recordingLine() + "\n\n")
-	b.WriteString(m.section("SHORTCUT", m.focus == focusShortcut))
-	b.WriteString("  toggle    sasayaki toggle\n\n")
-	b.WriteString(m.section("LAST", false))
+	b.WriteString("  " + m.recordingLine() + "\n")
+	b.WriteString("  " + m.actionLine(focusRecord, "trial record  [t]") + "\n\n")
+	b.WriteString(m.section("LAST RESULT", false))
 	last, guidance := m.lastBlock()
 	b.WriteString("  " + last + "\n")
-	b.WriteString("  " + guidance)
-	return m.cardFrame("VOICE", b.String())
-}
-
-func (m Model) runtimeCard() string {
-	var b strings.Builder
+	b.WriteString("  " + guidance + "\n")
 	b.WriteString(m.section("SERVICE", false))
-	b.WriteString("  " + m.serviceLine() + "\n\n")
-	b.WriteString(m.section("LOCAL ENGINE", false))
+	b.WriteString("  " + m.serviceLine() + "\n")
 	b.WriteString("  " + m.engineLine() + "\n\n")
-	b.WriteString(m.section("TRANSLATION", false))
-	b.WriteString("  " + m.translationLine() + "\n\n")
-	b.WriteString(m.section("ACTIONS", false))
-	b.WriteString("  " + m.actionLine(focusSetup, "setup") + "\n")
-	b.WriteString("  " + m.actionLine(focusDiagnose, "diagnose") + "\n")
-	b.WriteString("  " + m.actionLine(focusLogs, "logs"))
-	return m.cardFrame("RUNTIME", b.String())
+	b.WriteString(m.section("ACTIVITY", m.focus == focusLogs))
+	b.WriteString("  " + m.actionLine(focusLogs, "view service log  [l]"))
+	return m.cardFrame("LIVE", b.String())
 }
 
 // section renders the ◆ section marker, focusing the pointer when active.
@@ -263,6 +269,49 @@ func (m Model) engineLine() string {
 	return model + " " + name + "   " + runtime + " runtime"
 }
 
+func (m Model) modelLine() string {
+	id := "sensevoice-int8"
+	if m.state != nil && m.state.SpeechModel != "" {
+		id = m.state.SpeechModel
+	}
+	model, ok := transcribe.SpeechModelByID(id)
+	if !ok {
+		return m.dot(m.theme.danger) + "Unknown model"
+	}
+	label := truncatePlain(model.Label, m.cardTextWidth()-2)
+	if m.state != nil && m.state.Model {
+		return m.dot(m.theme.mint) + label
+	}
+	return m.dot(m.theme.amber) + truncatePlain(label+" · not downloaded", m.cardTextWidth()-2)
+}
+
+func (m Model) modelDetail() string {
+	id := "sensevoice-int8"
+	if m.state != nil && m.state.SpeechModel != "" {
+		id = m.state.SpeechModel
+	}
+	model, ok := transcribe.SpeechModelByID(id)
+	if !ok {
+		return "choose a supported local model"
+	}
+	return truncatePlain(model.Architecture+" · "+model.Languages, m.cardTextWidth())
+}
+
+func (m Model) cardTextWidth() int {
+	width := m.layout.cardWidth - 4 // border plus the two-space body indent
+	if width < 12 {
+		return 12
+	}
+	return width
+}
+
+func (m Model) languageLine() string {
+	if m.state == nil || m.state.Language == "" {
+		return "auto detect"
+	}
+	return m.state.Language
+}
+
 func (m Model) inputLine() string {
 	if m.state == nil {
 		return "○ Unknown"
@@ -300,7 +349,7 @@ func (m Model) dot(color lipgloss.Color) string {
 // footer is the centered bottom line: transient notice while fresh, else
 // the key hints.
 func (m Model) footer() string {
-	text := "t record · s setup · r repair · m models · b shortcut · ? help · q quit"
+	text := "t test · m models · r repair · d diagnose · b shortcut · ? help · q quit"
 	if m.notice != "" && time.Now().Before(m.noticeUntil) {
 		text = m.notice
 	}
@@ -312,7 +361,7 @@ func (m Model) footer() string {
 func (m Model) compactView() string {
 	title := m.theme.base().Foreground(m.theme.violet).Bold(true).Render("✦ sasayaki")
 	line := title + "   " + m.pill()
-	hint := m.theme.base().Foreground(m.theme.muted).Render("t record · s setup · r repair · m models · ? help · q quit")
+	hint := m.theme.base().Foreground(m.theme.muted).Render("t test · m models · r repair · d diagnose · ? help · q quit")
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
 		line+"\n"+hint)
 }

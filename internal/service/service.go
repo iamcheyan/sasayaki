@@ -241,6 +241,7 @@ func (d *Daemon) State() *protocol.State {
 		Runtime:      transcribe.InstalledFor(d.paths, d.cfg.SpeechModel),
 		Model:        transcribe.ModelValidFor(d.paths, d.cfg.SpeechModel),
 		SpeechModel:  d.cfg.SpeechModel,
+		Language:     d.cfg.Language,
 		Translation:  translationState(d.cfg.Translation),
 		Microphone:   d.micOK(),
 		Paste:        paste.AvailableDefault(),

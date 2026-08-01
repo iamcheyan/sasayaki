@@ -296,8 +296,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "r", "R":
 		return m.startSetup()
 	case "d", "D":
-		m.overlay = overlayConfirm
-		return m, nil
+		m.overlay = overlayDiag
+		m.diagDone = false
+		return m, diagCmd(m.paths)
 	case "b", "B":
 		m.overlay = overlayKeys
 		return m, nil
@@ -334,11 +335,11 @@ func (m *Model) showNotice(text string) {
 // activateFocused runs the harmless action under the focus.
 func (m Model) activateFocused() (tea.Model, tea.Cmd) {
 	switch m.focus {
+	case focusModel:
+		m.overlay = overlayModels
+		return m, nil
 	case focusRecord:
 		return m, toggleCmd(m.paths)
-	case focusShortcut:
-		m.overlay = overlayKeys
-		return m, nil
 	case focusSetup:
 		return m.startSetup()
 	case focusDiagnose:
