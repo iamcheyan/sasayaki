@@ -1,7 +1,7 @@
 # Sasayaki
 
 Sasayaki is a small, standalone voice-input application for Linux. It records
-audio, transcribes it locally with SenseVoice, and pastes the result into the
+audio, transcribes it locally with a selectable offline engine, and pastes the result into the
 focused application.
 
 It is intentionally independent of Sumika, Omarchy, and any one desktop
@@ -16,7 +16,7 @@ and desktop-shortcut guidance.
 - systemd user services (for the background recorder/transcriber)
 
 The first-run setup installs Python packages in Sasayaki's own data directory
-and downloads the SenseVoice model. It does not modify an existing Python
+and downloads the selected offline model. It does not modify an existing Python
 installation.
 
 ## Quick start
@@ -62,15 +62,24 @@ sasayaki logs            Follow the user-service log
 
 ## Models, translation and repair
 
-Sasayaki detects the selected local speech model before it records. Choose a
-compact or full-precision local model, then run setup to download, verify and
-activate it:
+Sasayaki detects the selected local speech model before it records. Its model
+catalog includes multilingual **SenseVoice** (fast int8 or quality-first full
+precision) and Chinese-first **Paraformer**. The first is compatible with
+Chinese, English, Japanese, Korean, and Cantonese; Paraformer is a separate
+recognizer backend, not merely a precision variant.
+
+Choose and download a model in one command (or select it first and let Setup
+download it later):
 
 ```sh
 sasayaki models
-sasayaki models select sensevoice-full
-sasayaki setup
+sasayaki models download paraformer-zh-int8
+# or: sasayaki models select sensevoice-full && sasayaki setup
 ```
+
+Models are pinned by SHA-256 and kept in separate private directories. The
+ONNX files work on both x86_64 and ARM64; the private `sherpa-onnx` Python
+runtime is installed as the wheel appropriate to the user's CPU architecture.
 
 Optional translation runs only after local speech recognition. It works with
 an OpenAI-compatible endpoint and is completely independent of OpenCode or

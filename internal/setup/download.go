@@ -119,12 +119,12 @@ func downloadModel(p config.Paths, modelID string, progress func(string)) (strin
 		return "", fmt.Errorf("unknown speech model %q", modelID)
 	}
 	for _, f := range files {
-		dest := filepath.Join(p.ModelDir(), f.Name)
+		dest := filepath.Join(transcribe.ModelDir(p, modelID), f.Name)
 		if fileValid(dest, f.SHA256) {
 			continue
 		}
 		progress("Downloading " + f.Name + "…")
-		if err := downloadFile(transcribe.Model.Source+f.Name, dest, f.SHA256); err != nil {
+		if err := downloadFile(transcribe.ModelSource(modelID)+f.Name, dest, f.SHA256); err != nil {
 			return "", err
 		}
 		if err := os.Rename(dest+".part", dest); err != nil {

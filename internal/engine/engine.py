@@ -40,9 +40,15 @@ def clean(text):
     return re.sub(r"<[^>]+>", "", text).strip()
 
 
-def make_recognizer(model_dir, model_file, language, num_threads=4):
+def make_recognizer(model_dir, model_file, architecture, language, num_threads=4):
     import sherpa_onnx
 
+    if architecture == "paraformer":
+        return sherpa_onnx.OfflineRecognizer.from_paraformer(
+            paraformer=os.path.join(model_dir, model_file),
+            tokens=os.path.join(model_dir, "tokens.txt"),
+            num_threads=num_threads,
+        )
     return sherpa_onnx.OfflineRecognizer.from_sense_voice(
         model=os.path.join(model_dir, model_file),
         tokens=os.path.join(model_dir, "tokens.txt"),
@@ -61,7 +67,7 @@ def run_recognizer(recognizer, wav):
 
 
 def transcribe(args):
-    recognizer = make_recognizer(args.model_dir, args.model_file, args.language)
+    recognizer = make_recognizer(args.model_dir, args.model_file, args.architecture, args.language)
     text = run_recognizer(recognizer, args.wav)
     if text:
         print(text)
@@ -76,7 +82,7 @@ def serve(args):
     recognizer = None
     language = None
     try:
-        recognizer = make_recognizer(args.model_dir, args.model_file, args.language)
+        recognizer = make_recognizer(args.model_dir, args.model_file, args.architecture, args.language)
         language = args.language
     except Exception as exc:  # model missing or dependency not installed
         emit({"ready": False, "error": str(exc)})
@@ -99,8 +105,11 @@ def serve(args):
                 emit({"id": request_id, "ok": True, "language": language})
             elif command == "transcribe":
                 want = req.get("language") or language
-                if want != language:
-                    recognizer = make_recognizer(args.model_dir, args.model_file, want)
+                # Paraformer has no per-request language setting. Rebuilding
+                # it is needless; SenseVoice keeps its existing language
+                # switch behavior.
+                if want != language and args.architecture == "sensevoice":
+                    recognizer = make_recognizer(args.model_dir, args.model_file, args.architecture, want)
                     language = want
                 text = run_recognizer(recognizer, req.get("wav"))
                 if not text:
@@ -122,6 +131,7 @@ for name in ("transcribe", "serve"):
     p = sub.add_parser(name)
     p.add_argument("--model-dir", required=True)
     p.add_argument("--model-file", default="model.int8.onnx")
+    p.add_argument("--architecture", choices=("sensevoice", "paraformer"), default="sensevoice")
     p.add_argument("--language", default="auto")
     if name == "transcribe":
         p.add_argument("wav")

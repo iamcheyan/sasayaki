@@ -41,19 +41,24 @@ var Model = struct {
 	},
 }
 
-// SpeechModel is a selectable local recognizer variant. Both supported
-// variants use the same multilingual SenseVoice architecture and token file;
-// the full model is a quality-first option while int8 is the practical
-// default for laptops.
+// SpeechModel is one complete offline recognizer choice. Architecture is the
+// ASR backend (not the user's CPU): SenseVoice is multilingual; Paraformer is
+// Chinese-first. Each model owns its manifest and private data directory.
 type SpeechModel struct {
-	ID        string
-	Label     string
-	ModelFile ModelFile
+	ID           string
+	Label        string
+	Architecture string
+	Languages    string
+	Description  string
+	Source       string
+	ModelFile    ModelFile
+	Files        []ModelFile
 }
 
 var SpeechModels = []SpeechModel{
-	{ID: "sensevoice-int8", Label: "SenseVoice Small · int8 · 229 MB", ModelFile: Model.Files[0]},
-	{ID: "sensevoice-full", Label: "SenseVoice Small · full precision · 894 MB", ModelFile: ModelFile{Name: "model.onnx", SHA256: "977016bd9c79f9eb343430b5cc305e07ab64d5212dff41b0dcfa1694bee9a8cb", Size: 937617178}},
+	{ID: "sensevoice-int8", Label: "SenseVoice Small · int8 · 229 MB", Architecture: "sensevoice", Languages: "Chinese · English · Japanese · Korean · Cantonese", Description: "Fast multilingual default for everyday dictation.", Source: Model.Source, ModelFile: Model.Files[0]},
+	{ID: "sensevoice-full", Label: "SenseVoice Small · full precision · 894 MB", Architecture: "sensevoice", Languages: "Chinese · English · Japanese · Korean · Cantonese", Description: "Higher-quality multilingual model; needs more disk and memory.", Source: Model.Source, ModelFile: ModelFile{Name: "model.onnx", SHA256: "977016bd9c79f9eb343430b5cc305e07ab64d5212dff41b0dcfa1694bee9a8cb", Size: 937617178}},
+	{ID: "paraformer-zh-int8", Label: "Paraformer Large · int8 · 232 MB", Architecture: "paraformer", Languages: "Chinese", Description: "Chinese-first alternative with a dedicated Paraformer backend.", Source: "https://huggingface.co/csukuangfj/sherpa-onnx-paraformer-zh-2023-09-14/resolve/main/", ModelFile: ModelFile{Name: "model.int8.onnx", SHA256: "f36a0433bcf096bd6d6f11b80a3ac8bed110bdca632fe0d731df8d1a84475945", Size: 243371218}, Files: []ModelFile{{Name: "model.int8.onnx", SHA256: "f36a0433bcf096bd6d6f11b80a3ac8bed110bdca632fe0d731df8d1a84475945", Size: 243371218}, {Name: "tokens.txt", SHA256: "59aba8873a2ed1e122c25fee421e25f283b63290efbde85c1c01a853d83cb6e6", Size: 75756}}},
 }
 
 func SpeechModelByID(id string) (SpeechModel, bool) {
@@ -66,6 +71,13 @@ func SpeechModelByID(id string) (SpeechModel, bool) {
 }
 
 func ModelFiles(id string) []ModelFile {
+	selected, ok := SpeechModelByID(id)
+	if !ok {
+		return nil
+	}
+	if len(selected.Files) != 0 {
+		return append([]ModelFile(nil), selected.Files...)
+	}
 	var voice ModelFile
 	switch id {
 	case "sensevoice-int8":
@@ -73,12 +85,30 @@ func ModelFiles(id string) []ModelFile {
 		// can substitute a hermetic manifest without duplicating catalog data.
 		voice = Model.Files[0]
 	case "sensevoice-full":
-		selected, _ := SpeechModelByID(id)
 		voice = selected.ModelFile
-	default:
-		return nil
 	}
 	return []ModelFile{voice, Model.Files[1], Model.Files[2]}
+}
+
+func ModelSource(id string) string {
+	// Keep the default manifest live so setup tests and downstream packagers
+	// can substitute its mirror without rebuilding the catalog.
+	if id == "sensevoice-int8" || id == "sensevoice-full" {
+		return Model.Source
+	}
+	selected, ok := SpeechModelByID(id)
+	if !ok || selected.Source == "" {
+		return ""
+	}
+	return selected.Source
+}
+
+func ModelDir(p config.Paths, id string) string {
+	// Preserve the directory used by the first public Sasayaki release.
+	if id == "sensevoice-int8" {
+		return p.ModelDir()
+	}
+	return p.ModelDirFor(id)
 }
 
 // ModelFile is one file of the pinned model.
@@ -99,7 +129,7 @@ func VerifyModelFor(p config.Paths, id string) []string {
 		return []string{fmt.Sprintf("unknown speech model %q", id)}
 	}
 	for _, f := range files {
-		path := filepath.Join(p.ModelDir(), f.Name)
+		path := filepath.Join(ModelDir(p, id), f.Name)
 		fi, err := os.Stat(path)
 		if err != nil {
 			problems = append(problems, fmt.Sprintf("missing %s", f.Name))

@@ -189,7 +189,8 @@ func (w *Worker) startLocked(ctx context.Context, recordBackoff bool) error {
 		return fmt.Errorf("unknown speech model %q", w.modelID)
 	}
 	cmd := exec.Command(engine.Python(w.paths), "-u", w.paths.EngineScript(), "serve",
-		"--model-dir", w.paths.ModelDir(), "--model-file", selected.ModelFile.Name, "--language", w.language)
+		"--model-dir", ModelDir(w.paths, selected.ID), "--model-file", selected.ModelFile.Name,
+		"--architecture", selected.Architecture, "--language", w.language)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err

@@ -137,6 +137,13 @@ func NewPaths() Paths {
 }
 
 func (p Paths) ConfigFile() string { return filepath.Join(p.ConfigHome, "config.json") }
+
+// ModelDirFor is the private directory for one speech model. Keeping each
+// backend separate prevents identically named ONNX files from colliding.
+func (p Paths) ModelDirFor(id string) string { return filepath.Join(p.DataHome, "models", id) }
+
+// ModelDir is retained for the original SenseVoice installation path so an
+// existing installation continues to work after upgrading.
 func (p Paths) ModelDir() string   { return filepath.Join(p.DataHome, "models", "sensevoice") }
 func (p Paths) RuntimeDir() string { return filepath.Join(p.DataHome, "runtime") }
 func (p Paths) VenvDir() string    { return filepath.Join(p.RuntimeDir(), "venv") }

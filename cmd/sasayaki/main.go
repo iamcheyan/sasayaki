@@ -207,7 +207,7 @@ func runModels(paths config.Paths, args []string) int {
 		fmt.Fprintln(os.Stderr, "sasayaki:", err)
 		return exitError
 	}
-	if len(args) == 2 && args[0] == "select" {
+	if len(args) == 2 && (args[0] == "select" || args[0] == "download") {
 		selected, ok := transcribe.SpeechModelByID(args[1])
 		if !ok {
 			fmt.Fprintln(os.Stderr, "sasayaki: unknown speech model:", args[1])
@@ -218,11 +218,18 @@ func runModels(paths config.Paths, args []string) int {
 			fmt.Fprintln(os.Stderr, "sasayaki:", err)
 			return exitError
 		}
-		fmt.Printf("Selected %s. Run `sasayaki setup` to download/verify it and restart the service.\n", selected.Label)
+		if args[0] == "download" {
+			fmt.Printf("Selected %s. Preparing its private runtime and model files…\n", selected.Label)
+			if err := runSetup(paths); err != nil {
+				return exitError
+			}
+			return exitOK
+		}
+		fmt.Printf("Selected %s. Run `sasayaki models download %s` (or `sasayaki setup`) to download and activate it.\n", selected.Label, selected.ID)
 		return exitOK
 	}
 	if len(args) != 0 {
-		fmt.Fprintln(os.Stderr, "sasayaki: usage: sasayaki models [select <id>]")
+		fmt.Fprintln(os.Stderr, "sasayaki: usage: sasayaki models [select|download <id>]")
 		return exitUsage
 	}
 	for _, model := range transcribe.SpeechModels {
@@ -235,7 +242,7 @@ func runModels(paths config.Paths, args []string) int {
 		if installed {
 			state = "installed"
 		}
-		fmt.Printf("%s %-18s %-46s %s\n", mark, model.ID, model.Label, state)
+		fmt.Printf("%s %-22s %-46s %-10s %s\n", mark, model.ID, model.Label, model.Architecture, state)
 	}
 	return exitOK
 }
@@ -353,7 +360,8 @@ Usage:
   sasayaki toggle               Start or finish voice input (desktop shortcut)
   sasayaki status [--json]      Show service and readiness state
   sasayaki diagnose [--json]    Full dependency and capability report
-  sasayaki models [select ID]  List/select a local speech model
+  sasayaki models [select|download ID]
+                              List, select, or download a local speech model
   sasayaki translation …       Configure/test optional online translation
   sasayaki service start|stop|restart|status
   sasayaki shortcut             Show desktop shortcut instructions

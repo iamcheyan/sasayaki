@@ -142,9 +142,9 @@ func Plan(cfg config.Config) []*Step {
 			},
 		},
 		{
-			ID: "model", Title: "Downloading and verifying the SenseVoice model",
+			ID: "model", Title: "Downloading and verifying the selected local model",
 			run: func(p config.Paths) (string, error) {
-				if err := os.MkdirAll(p.ModelDir(), 0o700); err != nil {
+				if err := os.MkdirAll(transcribe.ModelDir(p, cfg.SpeechModel), 0o700); err != nil {
 					return "", err
 				}
 				return downloadModel(p, cfg.SpeechModel, progress)
