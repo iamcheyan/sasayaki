@@ -1,10 +1,11 @@
+// Package engine owns the embedded engine.py runtime script and the paths
+// of the private Python environment. Model runtime health and request
+// execution live in internal/transcribe.
 package engine
 
 import (
 	_ "embed"
-	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 
 	"github.com/iamcheyan/sasayaki/internal/config"
@@ -13,13 +14,8 @@ import (
 //go:embed engine.py
 var script []byte
 
-func Installed(p config.Paths) bool {
-	_, scriptErr := os.Stat(p.EngineScript())
-	_, modelErr := os.Stat(filepath.Join(p.ModelDir(), "model.int8.onnx"))
-	_, tokensErr := os.Stat(filepath.Join(p.ModelDir(), "tokens.txt"))
-	return scriptErr == nil && modelErr == nil && tokensErr == nil
-}
-
+// WriteScript installs the embedded engine.py into Sasayaki's runtime
+// directory.
 func WriteScript(p config.Paths) error {
 	if err := os.MkdirAll(filepath.Dir(p.EngineScript()), 0o700); err != nil {
 		return err
@@ -27,13 +23,5 @@ func WriteScript(p config.Paths) error {
 	return os.WriteFile(p.EngineScript(), script, 0o700)
 }
 
+// Python returns the interpreter of Sasayaki's private virtualenv.
 func Python(p config.Paths) string { return filepath.Join(p.VenvDir(), "bin", "python") }
-
-func Transcribe(p config.Paths, wav, language string) (string, error) {
-	cmd := exec.Command(Python(p), p.EngineScript(), "transcribe", "--model-dir", p.ModelDir(), "--language", language, wav)
-	b, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("voice engine: %w: %s", err, string(b))
-	}
-	return string(b), nil
-}

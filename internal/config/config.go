@@ -1,11 +1,90 @@
+// Package config owns XDG path resolution, validated configuration and
+// atomic persistence. Sasayaki never reads or writes paths owned by other
+// applications.
 package config
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
+// Defaults for configurable behavior.
+const (
+	DefaultLanguage     = "auto"
+	DefaultShortcutMode = "toggle"
+	DefaultRetention    = 10 * time.Minute
+	MinRecording        = 300 * time.Millisecond
+)
+
+// SupportedLanguages are the SenseVoice model languages accepted in config.
+var SupportedLanguages = []string{"auto", "zh", "ja", "en", "ko", "yue"}
+
+// Duration marshals as a Go duration string ("10m") so the config file
+// stays human-editable.
+type Duration time.Duration
+
+func (d Duration) MarshalJSON() ([]byte, error) {
+	return json.Marshal(time.Duration(d).String())
+}
+
+func (d *Duration) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return err
+	}
+	v, err := time.ParseDuration(s)
+	if err != nil {
+		return err
+	}
+	*d = Duration(v)
+	return nil
+}
+
+// Config is the validated user configuration. It is stored at
+// $XDG_CONFIG_HOME/sasayaki/config.json and never shared.
+type Config struct {
+	// Language selects automatic or a fixed model language.
+	Language string `json:"language"`
+	// ShortcutMode is the desktop-shortcut contract. Only "toggle" is
+	// implemented; portal push-to-talk is a future enhancement.
+	ShortcutMode string `json:"shortcut_mode"`
+	// Retention is how long temporary recordings are kept before cleanup.
+	Retention Duration `json:"retention"`
+	// KeepRecordings retains recordings indefinitely for diagnostics.
+	KeepRecordings bool `json:"keep_recordings"`
+	// VerboseTranscripts opt-in logging of full transcribed text.
+	VerboseTranscripts bool `json:"verbose_transcripts"`
+}
+
+// Default returns a configuration with documented defaults.
+func Default() Config {
+	return Config{
+		Language:     DefaultLanguage,
+		ShortcutMode: DefaultShortcutMode,
+		Retention:    Duration(DefaultRetention),
+	}
+}
+
+// Validate returns an error describing the first invalid field.
+func (c Config) Validate() error {
+	if !contains(SupportedLanguages, c.Language) {
+		return fmt.Errorf("language %q is not supported (use one of %v)", c.Language, SupportedLanguages)
+	}
+	if c.ShortcutMode != "toggle" {
+		return fmt.Errorf("shortcut_mode %q is not supported (only \"toggle\")", c.ShortcutMode)
+	}
+	if c.Retention < 0 {
+		return errors.New("retention must not be negative")
+	}
+	return nil
+}
+
+// Paths resolves every location Sasayaki owns from the XDG environment.
+// Constructing Paths is cheap; NewPaths reads the environment once.
 type Paths struct {
 	ConfigHome string
 	DataHome   string
@@ -13,10 +92,10 @@ type Paths struct {
 	Runtime    string
 }
 
-type Config struct {
-	Language string `json:"language"`
-}
-
+// NewPaths resolves XDG base directories. When an XDG variable is unset the
+// XDG base-directory specification defaults are used; when XDG_RUNTIME_DIR is
+// unset a per-user directory under /tmp is used so the control socket still
+// works on unusual setups.
 func NewPaths() Paths {
 	home, _ := os.UserHomeDir()
 	configHome := envOr("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
@@ -24,7 +103,7 @@ func NewPaths() Paths {
 	stateHome := envOr("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
 	runtime := os.Getenv("XDG_RUNTIME_DIR")
 	if runtime == "" {
-		runtime = filepath.Join("/tmp", "sasayaki-"+os.Getenv("USER"))
+		runtime = filepath.Join(os.TempDir(), "sasayaki-"+os.Getenv("USER"))
 	}
 	return Paths{
 		ConfigHome: filepath.Join(configHome, "sasayaki"),
@@ -34,17 +113,27 @@ func NewPaths() Paths {
 	}
 }
 
-func (p Paths) ConfigFile() string   { return filepath.Join(p.ConfigHome, "config.json") }
-func (p Paths) ModelDir() string     { return filepath.Join(p.DataHome, "models", "sensevoice") }
-func (p Paths) VenvDir() string      { return filepath.Join(p.DataHome, "runtime", "venv") }
-func (p Paths) EngineScript() string { return filepath.Join(p.DataHome, "runtime", "engine.py") }
+func (p Paths) ConfigFile() string { return filepath.Join(p.ConfigHome, "config.json") }
+func (p Paths) ModelDir() string   { return filepath.Join(p.DataHome, "models", "sensevoice") }
+func (p Paths) RuntimeDir() string { return filepath.Join(p.DataHome, "runtime") }
+func (p Paths) VenvDir() string    { return filepath.Join(p.RuntimeDir(), "venv") }
+func (p Paths) EngineScript() string {
+	return filepath.Join(p.RuntimeDir(), "engine.py")
+}
+func (p Paths) RequirementsFile() string {
+	return filepath.Join(p.RuntimeDir(), "requirements.txt")
+}
+func (p Paths) VenvMarker() string {
+	return filepath.Join(p.VenvDir(), "sasayaki.installed")
+}
 func (p Paths) ServiceFile() string {
 	return filepath.Join(filepath.Dir(p.ConfigHome), "systemd", "user", "sasayaki.service")
 }
 func (p Paths) Socket() string        { return filepath.Join(p.Runtime, "sasayaki.sock") }
-func (p Paths) EngineSocket() string  { return filepath.Join(p.Runtime, "engine.sock") }
 func (p Paths) RecordingsDir() string { return filepath.Join(p.StateHome, "recordings") }
 
+// Ensure creates every private directory Sasayaki owns with 0700
+// permissions. It is idempotent.
 func (p Paths) Ensure() error {
 	for _, dir := range []string{p.ConfigHome, p.DataHome, p.StateHome, p.Runtime, p.RecordingsDir()} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -54,8 +143,11 @@ func (p Paths) Ensure() error {
 	return nil
 }
 
+// Load reads and validates config.json. A missing file yields defaults;
+// a present but invalid file is an error so the user is never silently
+// served a guessed configuration.
 func Load(p Paths) (Config, error) {
-	c := Config{Language: "auto"}
+	c := Default()
 	b, err := os.ReadFile(p.ConfigFile())
 	if os.IsNotExist(err) {
 		return c, nil
@@ -63,10 +155,22 @@ func Load(p Paths) (Config, error) {
 	if err != nil {
 		return c, err
 	}
-	return c, json.Unmarshal(b, &c)
+	if err := json.Unmarshal(b, &c); err != nil {
+		return c, fmt.Errorf("config %s: %w", p.ConfigFile(), err)
+	}
+	if err := c.Validate(); err != nil {
+		return c, fmt.Errorf("config %s: %w", p.ConfigFile(), err)
+	}
+	return c, nil
 }
 
+// Save writes config atomically: the payload goes to a temporary file in the
+// same directory, is fsynced, and is renamed over the target. A crash can
+// never truncate a previously good config.
 func Save(p Paths, c Config) error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(p.ConfigHome, 0o700); err != nil {
 		return err
 	}
@@ -74,7 +178,29 @@ func Save(p Paths, c Config) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p.ConfigFile(), append(b, '\n'), 0o600)
+	b = append(b, '\n')
+	temp, err := os.CreateTemp(p.ConfigHome, "config.json.tmp*")
+	if err != nil {
+		return err
+	}
+	tempName := temp.Name()
+	defer os.Remove(tempName)
+	if err := temp.Chmod(0o600); err != nil {
+		temp.Close()
+		return err
+	}
+	if _, err := temp.Write(b); err != nil {
+		temp.Close()
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tempName, p.ConfigFile())
 }
 
 func envOr(name, fallback string) string {
@@ -82,4 +208,13 @@ func envOr(name, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func contains(list []string, want string) bool {
+	for _, v := range list {
+		if v == want {
+			return true
+		}
+	}
+	return false
 }

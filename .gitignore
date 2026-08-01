@@ -3,3 +3,5 @@
 *.part
 *.wav
 __pycache__/
+*.pyc
+.venv/
