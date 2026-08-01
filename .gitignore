@@ -2,3 +2,4 @@
 /dist/
 *.part
 *.wav
+__pycache__/
