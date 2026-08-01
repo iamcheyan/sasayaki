@@ -163,10 +163,10 @@ func (m Model) setupBox() string {
 
 func (m Model) confirmBox() string {
 	var b strings.Builder
-	b.WriteString(m.boxTitle("Stop the service?") + "\n\n")
-	b.WriteString("  Stopping sasayaki disables voice input until the\n")
-	b.WriteString("  service is started again (sasayaki service start).\n\n")
-	b.WriteString("  " + m.theme.base().Foreground(m.theme.focus).Bold(true).Render("y") + " stop   " +
+	b.WriteString(m.boxTitle("Disable the service?") + "\n\n")
+	b.WriteString("  This stops Sasayaki and prevents it from starting\n")
+	b.WriteString("  with your user session. Your model and settings stay.\n\n")
+	b.WriteString("  " + m.theme.base().Foreground(m.theme.focus).Bold(true).Render("y") + " disable   " +
 		m.theme.base().Foreground(m.theme.focus).Bold(true).Render("n") + " keep running\n")
 	return b.String()
 }

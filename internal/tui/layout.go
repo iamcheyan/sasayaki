@@ -137,5 +137,7 @@ func computeLayout(width, height int) layout {
 	return l
 }
 
-// cardHeight is the fixed height of both cards, equal by construction.
-const cardHeight = 12
+// cardHeight is the outside height of both cards, equal by construction.
+// It includes the two border rows and leaves enough breathing room for the
+// deliberately small main-screen content.
+const cardHeight = 13

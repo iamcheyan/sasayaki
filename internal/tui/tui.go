@@ -6,6 +6,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -220,8 +221,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch key {
 		case "y", "Y", "enter":
 			m.overlay = overlayNone
-			m.showNotice("Stopping the service…")
-			return m, stopServiceCmd()
+			m.showNotice("Disabling the service…")
+			return m, disableServiceCmd()
 		case "n", "N", "esc", "q", "Q":
 			m.overlay = overlayNone
 			return m, nil
@@ -383,12 +384,12 @@ func toggleCmd(paths config.Paths) tea.Cmd {
 	}
 }
 
-func stopServiceCmd() tea.Cmd {
+func disableServiceCmd() tea.Cmd {
 	return func() tea.Msg {
-		if err := service.Systemctl("stop", "sasayaki.service"); err != nil {
-			return noticeMsg{text: "Could not stop the service: " + err.Error()}
+		if err := service.Systemctl("disable", "--now", "sasayaki.service"); err != nil {
+			return noticeMsg{text: "Could not disable the service: " + err.Error()}
 		}
-		return noticeMsg{text: "Service stopped"}
+		return noticeMsg{text: "Service disabled"}
 	}
 }
 
@@ -420,9 +421,9 @@ func diagCmd(paths config.Paths) tea.Cmd {
 // lines into msgs. It closes msgs after the final result.
 func runSetupGoroutine(paths config.Paths, msgs chan<- tea.Msg) {
 	defer close(msgs)
-	binary, err := exec.LookPath("sasayaki")
+	binary, err := os.Executable()
 	if err != nil {
-		msgs <- setupDoneMsg{err: fmt.Errorf("run `sasayaki setup` from the installed binary: %w", err)}
+		msgs <- setupDoneMsg{err: fmt.Errorf("could not locate the running sasayaki binary: %w", err)}
 		return
 	}
 	setup.SetBinary(binary)

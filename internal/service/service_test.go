@@ -210,6 +210,60 @@ func TestToggleHappyPath(t *testing.T) {
 	}
 }
 
+func TestToggleStartsANewRecordingAfterTerminalState(t *testing.T) {
+	paths := testPaths(t)
+	d, _, tr, pa := testDaemon(t, paths)
+
+	// Complete a normal first recording.
+	if _, perr := d.Toggle(); perr != nil {
+		t.Fatal(perr)
+	}
+	if _, perr := d.Toggle(); perr != nil {
+		t.Fatal(perr)
+	}
+	waitFor(t, "first succeeded phase", func() bool { return d.State().Phase == protocol.PhaseSucceeded })
+
+	// A future shortcut press must start recording rather than incorrectly
+	// reporting that the completed operation is still transcribing.
+	if _, perr := d.Toggle(); perr != nil {
+		t.Fatalf("toggle after success: %+v", perr)
+	}
+	if got := d.State().Phase; got != protocol.PhaseRecording {
+		t.Fatalf("phase after a second recording start = %q, want recording", got)
+	}
+	if _, perr := d.Toggle(); perr != nil {
+		t.Fatal(perr)
+	}
+	waitFor(t, "second succeeded phase", func() bool { return d.State().Phase == protocol.PhaseSucceeded })
+	if got := len(pa.pastedTexts()); got != 2 {
+		t.Fatalf("paste count = %d, want 2", got)
+	}
+	if got := len(tr.transcribed); got != 2 {
+		t.Fatalf("transcription count = %d, want 2", got)
+	}
+}
+
+func TestToggleStartsANewRecordingAfterFailure(t *testing.T) {
+	paths := testPaths(t)
+	d, rec, _, _ := testDaemon(t, paths)
+	rec.duration = 10 * time.Millisecond
+	if _, perr := d.Toggle(); perr != nil {
+		t.Fatal(perr)
+	}
+	if _, perr := d.Toggle(); perr == nil {
+		t.Fatal("short recording should fail")
+	}
+	if got := d.State().Phase; got != protocol.PhaseFailed {
+		t.Fatalf("phase = %q, want failed", got)
+	}
+	if _, perr := d.Toggle(); perr != nil {
+		t.Fatalf("toggle after failure: %+v", perr)
+	}
+	if got := d.State().Phase; got != protocol.PhaseRecording {
+		t.Fatalf("phase after retry = %q, want recording", got)
+	}
+}
+
 func TestToggleTooShort(t *testing.T) {
 	paths := testPaths(t)
 	d, rec, _, _ := testDaemon(t, paths)

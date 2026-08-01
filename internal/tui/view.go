@@ -76,12 +76,39 @@ func (m Model) cardFrame(title, body string) string {
 	if m.focusCard() == title {
 		borderColor = m.theme.focus
 	}
-	style := m.theme.base().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(borderColor).
-		Width(m.layout.cardWidth).
-		Height(cardHeight)
-	return style.Render(body)
+	// Lip Gloss has a lovely general border primitive, but it has no fieldset
+	// legend. Build this small frame deliberately so the card title lives in
+	// the top edge (the shared Shirabe visual language) instead of being a
+	// redundant heading inside the card.
+	width := m.layout.cardWidth
+	if width < 12 {
+		width = 12
+	}
+	inner := width - 2
+	edge := m.theme.base().Foreground(borderColor)
+	legend := m.theme.base().Foreground(m.theme.violet).Bold(true).Render(" " + title + " ")
+	rule := inner - lipgloss.Width(legend)
+	if rule < 1 {
+		rule = 1
+	}
+	var b strings.Builder
+	b.WriteString(edge.Render("╭") + legend + edge.Render(strings.Repeat("─", rule)+"╮") + "\n")
+
+	lines := strings.Split(strings.TrimSuffix(body, "\n"), "\n")
+	for len(lines) < cardHeight-2 {
+		lines = append(lines, "")
+	}
+	for _, line := range lines[:cardHeight-2] {
+		// Card content is intentionally written to fit the smallest full
+		// layout. A final plain-space pad keeps both cards exactly aligned.
+		padding := inner - lipgloss.Width(line)
+		if padding < 0 {
+			padding = 0
+		}
+		b.WriteString(edge.Render("│") + line + strings.Repeat(" ", padding) + edge.Render("│") + "\n")
+	}
+	b.WriteString(edge.Render("╰" + strings.Repeat("─", inner) + "╯"))
+	return b.String()
 }
 
 // focusCard returns "VOICE" or "RUNTIME" depending on which card holds the
@@ -171,13 +198,13 @@ func (m Model) lastBlock() (string, string) {
 	switch m.state.Phase {
 	case protocol.PhaseSucceeded:
 		if m.state.LastResult != "" {
-			return "“" + m.state.LastResult + "”", "Pasted into the focused window"
+			return "“" + truncatePlain(m.state.LastResult, 28) + "”", "Pasted into the focused window"
 		}
 	case protocol.PhaseFailed:
 		return shortError(m.state.LastError), "See diagnose (D) for what failed"
 	}
 	if m.state.LastPhase == protocol.PhaseSucceeded && m.state.LastResult != "" {
-		return "“" + m.state.LastResult + "”", "Ready for the next clip"
+		return "“" + truncatePlain(m.state.LastResult, 28) + "”", "Ready for the next clip"
 	}
 	return "—", "Press the shortcut to record"
 }
@@ -186,10 +213,24 @@ func shortError(detail string) string {
 	if detail == "" {
 		return "Error"
 	}
-	if len(detail) > 44 {
-		return detail[:44] + "…"
+	return truncatePlain(detail, 28)
+}
+
+func truncatePlain(s string, limit int) string {
+	if lipgloss.Width(s) <= limit {
+		return s
 	}
-	return detail
+	var b strings.Builder
+	width := 0
+	for _, r := range s {
+		rw := lipgloss.Width(string(r))
+		if width+rw > limit-1 {
+			break
+		}
+		b.WriteRune(r)
+		width += rw
+	}
+	return b.String() + "…"
 }
 
 func (m Model) serviceLine() string {

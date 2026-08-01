@@ -2,6 +2,7 @@ package tui
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/iamcheyan/sasayaki/internal/config"
@@ -140,6 +141,26 @@ func TestCardAndRowMapping(t *testing.T) {
 	}
 	if focusFor(0, 1) != focusShortcut || focusFor(1, 2) != focusLogs {
 		t.Fatal("focusFor mapping broken")
+	}
+}
+
+func TestCardFrameHasBorderLegendAndFixedHeight(t *testing.T) {
+	m := New(testPaths(t))
+	m.width, m.height = 120, 40
+	m.layout = computeLayout(m.width, m.height)
+	card := m.cardFrame("VOICE", "  one\n  two")
+	if !strings.Contains(card, "VOICE") || !strings.Contains(card, "╭") || !strings.Contains(card, "╰") {
+		t.Fatalf("card should render a titled fieldset border: %q", card)
+	}
+	if got := len(strings.Split(card, "\n")); got != cardHeight {
+		t.Fatalf("card rows = %d, want %d", got, cardHeight)
+	}
+}
+
+func TestTruncatePlainKeepsUTF8Valid(t *testing.T) {
+	got := truncatePlain("こんにちは世界", 5)
+	if got != "こん…" {
+		t.Fatalf("truncatePlain = %q, want %q", got, "こん…")
 	}
 }
 

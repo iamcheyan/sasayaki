@@ -259,7 +259,10 @@ func (d *Daemon) Toggle() (string, *protocol.Error) {
 	switch d.phase {
 	case protocol.PhaseRecording:
 		return d.finishRecording()
-	case protocol.PhaseIdle:
+	case protocol.PhaseIdle, protocol.PhaseSucceeded, protocol.PhaseFailed:
+		// Succeeded and failed are terminal snapshots, not locked states. The
+		// next toggle must begin a fresh recording while preserving the prior
+		// result/error in Last* fields for the TUI and status command.
 		return d.startRecording()
 	default:
 		return "", protocol.NewError(protocol.ErrStillTranscribing, protocol.ClassUser,
