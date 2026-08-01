@@ -80,3 +80,6 @@ The visual language is documented in
 [docs/tui-design-language.md](docs/tui-design-language.md).
 The implementation boundary and desktop-integration decisions are in
 [docs/architecture.md](docs/architecture.md).
+
+For a detailed engineering handoff/acceptance specification, see
+[docs/model-implementation-brief.md](docs/model-implementation-brief.md).
