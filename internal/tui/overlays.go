@@ -26,6 +26,8 @@ func (m Model) overlayView(content string) string {
 		box = m.setupBox()
 	case overlayConfirm:
 		box = m.confirmBox()
+	case overlayModels:
+		box = m.modelsBox()
 	}
 	width := m.layout.maxWidth
 	if width > 76 {
@@ -38,6 +40,18 @@ func (m Model) overlayView(content string) string {
 		Width(width).
 		Height(height)
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, style.Render(box))
+}
+
+func (m Model) modelsBox() string {
+	var b strings.Builder
+	b.WriteString(m.boxTitle("Local speech model") + "\n\n")
+	b.WriteString("  " + m.theme.base().Foreground(m.theme.focus).Bold(true).Render("1") + "  SenseVoice Small · int8 · 229 MB\n")
+	b.WriteString("     Fast, compact, recommended for most laptops.\n\n")
+	b.WriteString("  " + m.theme.base().Foreground(m.theme.focus).Bold(true).Render("2") + "  SenseVoice Small · full precision · 894 MB\n")
+	b.WriteString("     Higher precision, larger download and memory use.\n\n")
+	b.WriteString("  Choose a model, then press S to download/verify it and\n")
+	b.WriteString("  restart the voice service. Esc closes this chooser.\n")
+	return b.String()
 }
 
 // boxTitle renders the overlay title line with a marker.

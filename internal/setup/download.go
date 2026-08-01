@@ -112,9 +112,13 @@ func sha256File(path string) (string, error) {
 // downloadModel downloads every manifest file that is missing or corrupt and
 // atomically renames the verified .part file into place. Skipped (already
 // valid) files keep their original mtime.
-func downloadModel(p config.Paths, progress func(string)) (string, error) {
+func downloadModel(p config.Paths, modelID string, progress func(string)) (string, error) {
 	var downloaded []string
-	for _, f := range transcribe.Model.Files {
+	files := transcribe.ModelFiles(modelID)
+	if len(files) == 0 {
+		return "", fmt.Errorf("unknown speech model %q", modelID)
+	}
+	for _, f := range files {
 		dest := filepath.Join(p.ModelDir(), f.Name)
 		if fileValid(dest, f.SHA256) {
 			continue

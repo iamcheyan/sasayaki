@@ -37,6 +37,7 @@ const (
 type Worker struct {
 	paths    config.Paths
 	language string
+	modelID  string
 
 	mu      sync.Mutex
 	state   string
@@ -57,10 +58,11 @@ type result struct {
 
 // NewWorker creates a worker for the given model directory and language.
 // It does not start the process; call Start or ensureWarm.
-func NewWorker(paths config.Paths, language string) *Worker {
+func NewWorker(paths config.Paths, language, modelID string) *Worker {
 	return &Worker{
 		paths:    paths,
 		language: language,
+		modelID:  modelID,
 		state:    WorkerDead,
 		pending:  make(map[uint64]chan result),
 		nextID:   1,
@@ -182,8 +184,12 @@ func (w *Worker) Shutdown() {
 // startLocked spawns the process and waits for its ready line. On failure
 // the worker transitions to dead with the error recorded.
 func (w *Worker) startLocked(ctx context.Context, recordBackoff bool) error {
+	selected, ok := SpeechModelByID(w.modelID)
+	if !ok {
+		return fmt.Errorf("unknown speech model %q", w.modelID)
+	}
 	cmd := exec.Command(engine.Python(w.paths), "-u", w.paths.EngineScript(), "serve",
-		"--model-dir", w.paths.ModelDir(), "--language", w.language)
+		"--model-dir", w.paths.ModelDir(), "--model-file", selected.ModelFile.Name, "--language", w.language)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err

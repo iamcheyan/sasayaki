@@ -41,6 +41,46 @@ var Model = struct {
 	},
 }
 
+// SpeechModel is a selectable local recognizer variant. Both supported
+// variants use the same multilingual SenseVoice architecture and token file;
+// the full model is a quality-first option while int8 is the practical
+// default for laptops.
+type SpeechModel struct {
+	ID        string
+	Label     string
+	ModelFile ModelFile
+}
+
+var SpeechModels = []SpeechModel{
+	{ID: "sensevoice-int8", Label: "SenseVoice Small · int8 · 229 MB", ModelFile: Model.Files[0]},
+	{ID: "sensevoice-full", Label: "SenseVoice Small · full precision · 894 MB", ModelFile: ModelFile{Name: "model.onnx", SHA256: "977016bd9c79f9eb343430b5cc305e07ab64d5212dff41b0dcfa1694bee9a8cb", Size: 937617178}},
+}
+
+func SpeechModelByID(id string) (SpeechModel, bool) {
+	for _, model := range SpeechModels {
+		if model.ID == id {
+			return model, true
+		}
+	}
+	return SpeechModel{}, false
+}
+
+func ModelFiles(id string) []ModelFile {
+	var voice ModelFile
+	switch id {
+	case "sensevoice-int8":
+		// Read the default manifest dynamically so verification/download tests
+		// can substitute a hermetic manifest without duplicating catalog data.
+		voice = Model.Files[0]
+	case "sensevoice-full":
+		selected, _ := SpeechModelByID(id)
+		voice = selected.ModelFile
+	default:
+		return nil
+	}
+	return []ModelFile{voice, Model.Files[1], Model.Files[2]}
+}
+
 // ModelFile is one file of the pinned model.
 type ModelFile struct {
 	Name   string
@@ -50,9 +90,15 @@ type ModelFile struct {
 
 // VerifyModel checks every manifest file for existence and checksum.
 // It returns the list of problems; an empty list means the model is valid.
-func VerifyModel(p config.Paths) []string {
+func VerifyModel(p config.Paths) []string { return VerifyModelFor(p, "sensevoice-int8") }
+
+func VerifyModelFor(p config.Paths, id string) []string {
 	var problems []string
-	for _, f := range Model.Files {
+	files := ModelFiles(id)
+	if len(files) == 0 {
+		return []string{fmt.Sprintf("unknown speech model %q", id)}
+	}
+	for _, f := range files {
 		path := filepath.Join(p.ModelDir(), f.Name)
 		fi, err := os.Stat(path)
 		if err != nil {
@@ -76,7 +122,8 @@ func VerifyModel(p config.Paths) []string {
 }
 
 // ModelValid reports whether the installed model passes verification.
-func ModelValid(p config.Paths) bool { return len(VerifyModel(p)) == 0 }
+func ModelValid(p config.Paths) bool               { return ModelValidFor(p, "sensevoice-int8") }
+func ModelValidFor(p config.Paths, id string) bool { return len(VerifyModelFor(p, id)) == 0 }
 
 // Installed reports whether the full local runtime is present: the engine
 // script, a completed venv and a valid model.
@@ -88,6 +135,16 @@ func Installed(p config.Paths) bool {
 		return false
 	}
 	return ModelValid(p)
+}
+
+func InstalledFor(p config.Paths, id string) bool {
+	if _, err := os.Stat(p.EngineScript()); err != nil {
+		return false
+	}
+	if _, err := os.Stat(p.VenvMarker()); err != nil {
+		return false
+	}
+	return ModelValidFor(p, id)
 }
 
 func sha256File(path string) (string, error) {

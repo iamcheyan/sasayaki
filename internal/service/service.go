@@ -103,7 +103,7 @@ func New(paths config.Paths, log *slog.Logger) (*Daemon, error) {
 		return nil, err
 	}
 	d := newDaemon(paths, cfg, log)
-	d.transcriber = transcribe.NewWorker(paths, cfg.Language)
+	d.transcriber = transcribe.NewWorker(paths, cfg.Language, cfg.SpeechModel)
 	return d, nil
 }
 
@@ -203,7 +203,7 @@ func (d *Daemon) Shutdown() {
 // no-op when a transcriber was injected (tests).
 func (d *Daemon) startWorker() {
 	if d.transcriber == nil {
-		d.transcriber = transcribe.NewWorker(d.paths, d.cfg.Language)
+		d.transcriber = transcribe.NewWorker(d.paths, d.cfg.Language, d.cfg.SpeechModel)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), warmTimeout)
 	defer cancel()
@@ -237,8 +237,9 @@ func (d *Daemon) State() *protocol.State {
 		Version:      protocol.Version,
 		Service:      service,
 		Phase:        phase,
-		Runtime:      transcribe.Installed(d.paths),
-		Model:        transcribe.ModelValid(d.paths),
+		Runtime:      transcribe.InstalledFor(d.paths, d.cfg.SpeechModel),
+		Model:        transcribe.ModelValidFor(d.paths, d.cfg.SpeechModel),
+		SpeechModel:  d.cfg.SpeechModel,
 		Microphone:   d.micOK(),
 		Paste:        paste.AvailableDefault(),
 		PasteBackend: paste.BestBackend(paste.DefaultRunner()),

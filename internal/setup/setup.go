@@ -39,7 +39,7 @@ type Step struct {
 }
 
 // Plan is the ordered setup steps for the pinned model.
-func Plan() []*Step {
+func Plan(cfg config.Config) []*Step {
 	return []*Step{
 		{
 			ID: "prereqs", Title: "Checking prerequisites",
@@ -147,10 +147,10 @@ func Plan() []*Step {
 				if err := os.MkdirAll(p.ModelDir(), 0o700); err != nil {
 					return "", err
 				}
-				return downloadModel(p, progress)
+				return downloadModel(p, cfg.SpeechModel, progress)
 			},
 			skip: func(p config.Paths) (bool, string) {
-				if transcribe.ModelValid(p) {
+				if transcribe.ModelValidFor(p, cfg.SpeechModel) {
 					return true, "model files already verified"
 				}
 				return false, ""
@@ -177,7 +177,12 @@ func Plan() []*Step {
 				if err := systemctl("enable", "--now", "sasayaki.service"); err != nil {
 					return "", err
 				}
-				return "service enabled and started", nil
+				// Applying setup is also how a newly selected local model becomes
+				// active. `enable --now` does not restart an already active unit.
+				if err := systemctl("restart", "sasayaki.service"); err != nil {
+					return "", err
+				}
+				return "service enabled, started and refreshed", nil
 			},
 		},
 	}
@@ -211,7 +216,11 @@ func (r PlanResult) AllOK() bool { return len(r.Failed) == 0 }
 
 // NewSession builds a session for the given paths.
 func NewSession(paths config.Paths) *Session {
-	return &Session{paths: paths, steps: Plan()}
+	cfg, err := config.Load(paths)
+	if err != nil {
+		cfg = config.Default()
+	}
+	return &Session{paths: paths, steps: Plan(cfg)}
 }
 
 // Run executes the plan in order, stopping on the first failure so the user

@@ -41,7 +41,11 @@ func checkPrereqs(p config.Paths) error {
 			modelSpaceBytes>>20, free>>20)
 	}
 
-	if !transcribe.ModelValid(p) {
+	cfg, err := config.Load(p)
+	if err != nil {
+		return err
+	}
+	if !transcribe.ModelValidFor(p, cfg.SpeechModel) {
 		if err := checkNetwork(); err != nil {
 			return fmt.Errorf("cannot reach the model server (huggingface.co): %v — connect to the network and re-run `sasayaki setup`", err)
 		}

@@ -15,6 +15,7 @@ import (
 	"github.com/iamcheyan/sasayaki/internal/diagnostics"
 	"github.com/iamcheyan/sasayaki/internal/service"
 	"github.com/iamcheyan/sasayaki/internal/setup"
+	"github.com/iamcheyan/sasayaki/internal/transcribe"
 	"github.com/iamcheyan/sasayaki/internal/tui"
 )
 
@@ -50,6 +51,8 @@ func main() {
 	case "diagnose":
 		code := runDiagnose(paths, hasJSONFlag(args[1:]))
 		os.Exit(code)
+	case "models":
+		os.Exit(runModels(paths, args[1:]))
 	case "service":
 		os.Exit(runServiceCommand(args[1:]))
 	case "shortcut":
@@ -177,6 +180,45 @@ func runDiagnose(paths config.Paths, asJSON bool) int {
 	return exitOK
 }
 
+func runModels(paths config.Paths, args []string) int {
+	cfg, err := config.Load(paths)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "sasayaki:", err)
+		return exitError
+	}
+	if len(args) == 2 && args[0] == "select" {
+		selected, ok := transcribe.SpeechModelByID(args[1])
+		if !ok {
+			fmt.Fprintln(os.Stderr, "sasayaki: unknown speech model:", args[1])
+			return exitUsage
+		}
+		cfg.SpeechModel = selected.ID
+		if err := config.Save(paths, cfg); err != nil {
+			fmt.Fprintln(os.Stderr, "sasayaki:", err)
+			return exitError
+		}
+		fmt.Printf("Selected %s. Run `sasayaki setup` to download/verify it and restart the service.\n", selected.Label)
+		return exitOK
+	}
+	if len(args) != 0 {
+		fmt.Fprintln(os.Stderr, "sasayaki: usage: sasayaki models [select <id>]")
+		return exitUsage
+	}
+	for _, model := range transcribe.SpeechModels {
+		mark := " "
+		if model.ID == cfg.SpeechModel {
+			mark = "*"
+		}
+		installed := transcribe.ModelValidFor(paths, model.ID)
+		state := "not installed"
+		if installed {
+			state = "installed"
+		}
+		fmt.Printf("%s %-18s %-46s %s\n", mark, model.ID, model.Label, state)
+	}
+	return exitOK
+}
+
 func runServiceCommand(args []string) int {
 	if len(args) != 1 {
 		fmt.Fprintln(os.Stderr, "sasayaki: usage: sasayaki service <start|stop|restart|status>")
@@ -234,6 +276,7 @@ Usage:
   sasayaki toggle               Start or finish voice input (desktop shortcut)
   sasayaki status [--json]      Show service and readiness state
   sasayaki diagnose [--json]    Full dependency and capability report
+  sasayaki models [select ID]  List/select a local speech model
   sasayaki service start|stop|restart|status
   sasayaki shortcut             Show desktop shortcut instructions
   sasayaki logs                 Follow the user-service log

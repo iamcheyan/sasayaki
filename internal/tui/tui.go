@@ -17,6 +17,7 @@ import (
 	"github.com/iamcheyan/sasayaki/internal/protocol"
 	"github.com/iamcheyan/sasayaki/internal/service"
 	"github.com/iamcheyan/sasayaki/internal/setup"
+	"github.com/iamcheyan/sasayaki/internal/transcribe"
 )
 
 // overlays
@@ -28,6 +29,7 @@ const (
 	overlayDiag    = "diagnose"
 	overlaySetup   = "setup"
 	overlayConfirm = "confirm"
+	overlayModels  = "models"
 )
 
 // messages
@@ -43,6 +45,11 @@ type toggleMsg struct {
 }
 
 type noticeMsg struct{ text string }
+
+type modelChoiceMsg struct {
+	label string
+	err   error
+}
 
 type setupProgressMsg struct{ line string }
 
@@ -160,6 +167,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.showNotice(msg.text)
 		return m, nil
 
+	case modelChoiceMsg:
+		if msg.err != nil {
+			m.showNotice("Could not select model: " + msg.err.Error())
+		} else {
+			m.showNotice("Selected " + msg.label + " — press S to download/apply it")
+		}
+		return m, nil
+
 	case setupProgressMsg:
 		m.setupLines = append(m.setupLines, msg.line)
 		// Re-arm the stream for the next progress line.
@@ -231,6 +246,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if m.overlay != overlayNone {
+		if m.overlay == overlayModels {
+			switch key {
+			case "1":
+				return m, selectModelCmd(m.paths, "sensevoice-int8")
+			case "2":
+				return m, selectModelCmd(m.paths, "sensevoice-full")
+			case "esc", "m", "M":
+				m.overlay = overlayNone
+			}
+			return m, nil
+		}
 		switch key {
 		case "esc":
 			m.overlay = overlayNone
@@ -264,6 +290,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "b", "B":
 		m.overlay = overlayKeys
+		return m, nil
+	case "m", "M":
+		m.overlay = overlayModels
 		return m, nil
 	case "L":
 		m.overlay = overlayLogs
@@ -414,6 +443,24 @@ func diagCmd(paths config.Paths) tea.Cmd {
 	return func() tea.Msg {
 		report := diagnostics.All(paths)
 		return diagMsg{report: report}
+	}
+}
+
+func selectModelCmd(paths config.Paths, id string) tea.Cmd {
+	return func() tea.Msg {
+		selected, ok := transcribe.SpeechModelByID(id)
+		if !ok {
+			return modelChoiceMsg{err: fmt.Errorf("unknown model %q", id)}
+		}
+		cfg, err := config.Load(paths)
+		if err != nil {
+			return modelChoiceMsg{err: err}
+		}
+		cfg.SpeechModel = selected.ID
+		if err := config.Save(paths, cfg); err != nil {
+			return modelChoiceMsg{err: err}
+		}
+		return modelChoiceMsg{label: selected.Label}
 	}
 }
 

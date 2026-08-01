@@ -15,6 +15,7 @@ import (
 // Defaults for configurable behavior.
 const (
 	DefaultLanguage     = "auto"
+	DefaultSpeechModel  = "sensevoice-int8"
 	DefaultShortcutMode = "toggle"
 	DefaultRetention    = 10 * time.Minute
 	MinRecording        = 300 * time.Millisecond
@@ -47,6 +48,8 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 // Config is the validated user configuration. It is stored at
 // $XDG_CONFIG_HOME/sasayaki/config.json and never shared.
 type Config struct {
+	// SpeechModel selects an installed local ASR model from Sasayaki's catalog.
+	SpeechModel string `json:"speech_model"`
 	// Language selects automatic or a fixed model language.
 	Language string `json:"language"`
 	// ShortcutMode is the desktop-shortcut contract. Only "toggle" is
@@ -58,11 +61,23 @@ type Config struct {
 	KeepRecordings bool `json:"keep_recordings"`
 	// VerboseTranscripts opt-in logging of full transcribed text.
 	VerboseTranscripts bool `json:"verbose_transcripts"`
+	// Translation is optional. It targets any OpenAI-compatible chat endpoint
+	// and belongs solely to Sasayaki; it is never read from OpenCode/Sumika.
+	Translation TranslationConfig `json:"translation"`
+}
+
+type TranslationConfig struct {
+	Enabled        bool   `json:"enabled"`
+	BaseURL        string `json:"base_url,omitempty"`
+	Model          string `json:"model,omitempty"`
+	APIKey         string `json:"api_key,omitempty"`
+	TargetLanguage string `json:"target_language,omitempty"`
 }
 
 // Default returns a configuration with documented defaults.
 func Default() Config {
 	return Config{
+		SpeechModel:  DefaultSpeechModel,
 		Language:     DefaultLanguage,
 		ShortcutMode: DefaultShortcutMode,
 		Retention:    Duration(DefaultRetention),
@@ -74,11 +89,19 @@ func (c Config) Validate() error {
 	if !contains(SupportedLanguages, c.Language) {
 		return fmt.Errorf("language %q is not supported (use one of %v)", c.Language, SupportedLanguages)
 	}
+	if c.SpeechModel == "" {
+		return errors.New("speech_model must not be empty")
+	}
 	if c.ShortcutMode != "toggle" {
 		return fmt.Errorf("shortcut_mode %q is not supported (only \"toggle\")", c.ShortcutMode)
 	}
 	if c.Retention < 0 {
 		return errors.New("retention must not be negative")
+	}
+	if c.Translation.Enabled {
+		if c.Translation.BaseURL == "" || c.Translation.Model == "" || c.Translation.APIKey == "" || c.Translation.TargetLanguage == "" {
+			return errors.New("translation requires base_url, model, api_key and target_language when enabled")
+		}
 	}
 	return nil
 }

@@ -56,7 +56,7 @@ func fakePaths(t *testing.T) config.Paths {
 // context deadline. Requests beyond the first must also keep working.
 func TestWorkerTranscribeIDs(t *testing.T) {
 	p := fakePaths(t)
-	w := NewWorker(p, "auto")
+	w := NewWorker(p, "auto", "sensevoice-int8")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := w.EnsureWarm(ctx); err != nil {
@@ -88,7 +88,7 @@ func TestWorkerDeadWithoutVenv(t *testing.T) {
 		StateHome:  filepath.Join(root, "state", "sasayaki"),
 		Runtime:    filepath.Join(root, "runtime", "sasayaki"),
 	}
-	w := NewWorker(p, "auto")
+	w := NewWorker(p, "auto", "sensevoice-int8")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	err := w.EnsureWarm(ctx)

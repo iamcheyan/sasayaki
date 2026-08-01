@@ -252,7 +252,11 @@ func (m Model) engineLine() string {
 	}
 	model := m.mark(m.state.Model)
 	runtime := m.mark(m.state.Runtime)
-	return model + " model   " + runtime + " runtime"
+	name := m.state.SpeechModel
+	if name == "" {
+		name = "model"
+	}
+	return model + " " + name + "   " + runtime + " runtime"
 }
 
 func (m Model) inputLine() string {
@@ -282,7 +286,7 @@ func (m Model) dot(color lipgloss.Color) string {
 // footer is the centered bottom line: transient notice while fresh, else
 // the key hints.
 func (m Model) footer() string {
-	text := "t record   s setup   d disable   b shortcut   ? help   q quit"
+	text := "t record   s setup   m models   b shortcut   ? help   q quit"
 	if m.notice != "" && time.Now().Before(m.noticeUntil) {
 		text = m.notice
 	}
@@ -294,7 +298,7 @@ func (m Model) footer() string {
 func (m Model) compactView() string {
 	title := m.theme.base().Foreground(m.theme.violet).Bold(true).Render("✦ sasayaki")
 	line := title + "   " + m.pill()
-	hint := m.theme.base().Foreground(m.theme.muted).Render("t record · s setup · d disable · ? help · q quit")
+	hint := m.theme.base().Foreground(m.theme.muted).Render("t record · s setup · m models · ? help · q quit")
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
 		line+"\n"+hint)
 }

@@ -119,6 +119,7 @@ type State struct {
 	// Readiness.
 	Runtime      bool   `json:"runtime"`
 	Model        bool   `json:"model"`
+	SpeechModel  string `json:"speech_model,omitempty"`
 	Microphone   bool   `json:"microphone"`
 	Paste        bool   `json:"paste"`
 	PasteBackend string `json:"paste_backend,omitempty"`
