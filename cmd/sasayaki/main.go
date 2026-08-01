@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"github.com/iamcheyan/sasayaki/internal/service"
 	"github.com/iamcheyan/sasayaki/internal/setup"
 	"github.com/iamcheyan/sasayaki/internal/transcribe"
+	"github.com/iamcheyan/sasayaki/internal/translate"
 	"github.com/iamcheyan/sasayaki/internal/tui"
 )
 
@@ -43,6 +45,8 @@ func main() {
 		fail(runServe(paths, log))
 	case "setup":
 		fail(runSetup(paths))
+	case "repair":
+		fail(runRepair(paths))
 	case "toggle":
 		fail(runToggle(paths))
 	case "status":
@@ -102,6 +106,21 @@ func runSetup(paths config.Paths) error {
 		return fmt.Errorf("setup failed at step %s", strings.Join(result.Failed, ", "))
 	}
 	fmt.Println("Sasayaki is ready. Bind `sasayaki toggle` in your desktop settings.")
+	return nil
+}
+
+func runRepair(paths config.Paths) error {
+	fmt.Println("Checking and repairing Sasayaki…")
+	if err := runSetup(paths); err != nil {
+		return err
+	}
+	report := diagnostics.All(paths)
+	for _, check := range report.Checks {
+		if !check.OK {
+			return fmt.Errorf("repair completed but %s still needs attention: %s", check.Name, check.Detail)
+		}
+	}
+	fmt.Println("Local runtime, model, service and desktop tools are ready.")
 	return nil
 }
 
@@ -241,6 +260,19 @@ func runTranslation(paths config.Paths, args []string) int {
 		fmt.Println("Translation disabled.")
 		return exitOK
 	}
+	if len(args) >= 1 && args[0] == "test" {
+		text := "Hello from Sasayaki"
+		if len(args) > 1 {
+			text = strings.Join(args[1:], " ")
+		}
+		out, err := translate.Translate(context.Background(), cfg.Translation, text)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "sasayaki: translation test failed:", err)
+			return exitError
+		}
+		fmt.Println(out)
+		return exitOK
+	}
 	if len(args) > 0 && args[0] == "configure" {
 		flags := flag.NewFlagSet("translation configure", flag.ContinueOnError)
 		baseURL := flags.String("base-url", cfg.Translation.BaseURL, "OpenAI-compatible base URL")
@@ -316,12 +348,13 @@ func help() string {
 
 Usage:
   sasayaki                      Open the control center
-  sasayaki setup                Install/repair the local runtime, model and service
+  sasayaki setup                Install/repair the selected local runtime, model and service
+  sasayaki repair               Re-run checks and repair local components
   sasayaki toggle               Start or finish voice input (desktop shortcut)
   sasayaki status [--json]      Show service and readiness state
   sasayaki diagnose [--json]    Full dependency and capability report
   sasayaki models [select ID]  List/select a local speech model
-  sasayaki translation …       Configure optional online translation
+  sasayaki translation …       Configure/test optional online translation
   sasayaki service start|stop|restart|status
   sasayaki shortcut             Show desktop shortcut instructions
   sasayaki logs                 Follow the user-service log

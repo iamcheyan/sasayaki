@@ -285,6 +285,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, toggleCmd(m.paths)
 	case "s", "S":
 		return m.startSetup()
+	case "r", "R":
+		return m.startSetup()
 	case "d", "D":
 		m.overlay = overlayConfirm
 		return m, nil
