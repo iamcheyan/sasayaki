@@ -1,3 +1,7 @@
+// Package tui is the Sasayaki control center: two equal cards (VOICE /
+// RUNTIME) with spatial arrow-key navigation, letter shortcuts, overlays
+// and transient notices. It is a thin client over the control socket and
+// never talks to the model or the microphone itself.
 package tui
 
 import (
@@ -6,249 +10,424 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
-
+	"github.com/charmbracelet/bubbletea"
 	"github.com/iamcheyan/sasayaki/internal/config"
+	"github.com/iamcheyan/sasayaki/internal/diagnostics"
 	"github.com/iamcheyan/sasayaki/internal/protocol"
 	"github.com/iamcheyan/sasayaki/internal/service"
 	"github.com/iamcheyan/sasayaki/internal/setup"
 )
 
-var (
-	violet = lipgloss.Color("141")
-	mint   = lipgloss.Color("79")
-	muted  = lipgloss.Color("245")
-	amber  = lipgloss.Color("221")
-	title  = lipgloss.NewStyle().Foreground(violet).Bold(true)
-	dim    = lipgloss.NewStyle().Foreground(muted)
-	ok     = lipgloss.NewStyle().Foreground(mint).Bold(true)
-	alert  = lipgloss.NewStyle().Foreground(amber).Bold(true)
-	focus  = lipgloss.NewStyle().Foreground(violet).Bold(true)
+// overlays
+const (
+	overlayNone    = ""
+	overlayHelp    = "help"
+	overlayKeys    = "shortcut"
+	overlayLogs    = "logs"
+	overlayDiag    = "diagnose"
+	overlaySetup   = "setup"
+	overlayConfirm = "confirm"
 )
 
-type Model struct {
-	paths         config.Paths
-	width, height int
-	focus         int
-	state         *protocol.State
-	notice        string
-	overlay       string
-}
-
-type statusMsg struct {
+// messages
+type stateMsg struct {
 	state *protocol.State
 	err   error
 }
-type noticeMsg string
 
-func New(paths config.Paths) Model { return Model{paths: paths} }
-func (m Model) Init() tea.Cmd      { return refresh(m.paths) }
+type toggleMsg struct {
+	notice string
+	state  *protocol.State
+	err    error
+}
+
+type noticeMsg struct{ text string }
+
+type setupProgressMsg struct{ line string }
+
+type setupDoneMsg struct {
+	result setup.PlanResult
+	err    error
+}
+
+type logsMsg struct{ lines []string }
+
+type diagMsg struct {
+	report diagnostics.Report
+}
+
+type tickMsg struct{}
+
+// Model is the TUI state.
+type Model struct {
+	paths config.Paths
+	theme theme
+
+	width  int
+	height int
+	layout layout
+	focus  int
+
+	state    *protocol.State
+	gotState bool
+
+	notice      string
+	noticeUntil time.Time
+
+	overlay string
+
+	logs      []string
+	logScroll int
+	diag      diagnostics.Report
+	diagDone  bool
+
+	setupLines []string
+	setupCh    <-chan tea.Msg
+	setupBusy  bool
+
+	confirmTarget string
+}
+
+// New builds the TUI model.
+func New(paths config.Paths) Model {
+	return Model{
+		paths: paths,
+		theme: defaultTheme(),
+		focus: focusRecord,
+	}
+}
+
+// Run starts the TUI and blocks until quit.
+func Run(paths config.Paths) error {
+	program := tea.NewProgram(New(paths), tea.WithAltScreen())
+	_, err := program.Run()
+	return err
+}
+
+// Init starts state polling and the notice clock.
+func (m Model) Init() tea.Cmd {
+	return tea.Batch(pollState(m), tick())
+}
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-	case statusMsg:
-		if msg.err != nil {
-			m.state = &protocol.State{Service: "stopped"}
-			m.notice = "Service is not running — press S to set it up"
-		} else {
-			m.state = msg.state
-		}
-	case noticeMsg:
-		m.notice = string(msg)
-		return m, clearNotice()
-	case tea.KeyMsg:
-		if m.overlay != "" {
-			if msg.String() == "esc" || msg.String() == "?" {
-				m.overlay = ""
+		m.layout = computeLayout(msg.Width, msg.Height)
+		return m, nil
+
+	case tickMsg:
+		// Poll more eagerly while an operation is in flight.
+		interval := 2 * time.Second
+		if m.state != nil {
+			switch m.state.Phase {
+			case protocol.PhaseRecording, protocol.PhaseTranscribing, protocol.PhasePasting:
+				interval = 500 * time.Millisecond
 			}
+		}
+		if m.notice != "" && time.Now().After(m.noticeUntil) {
+			m.notice = ""
+		}
+		return m, tea.Batch(pollState(m), tea.Tick(interval, func(time.Time) tea.Msg { return tickMsg{} }))
+
+	case stateMsg:
+		if msg.err != nil {
+			// Socket vanished: clear the snapshot so the UI shows STOPPED.
+			m.state = nil
+			m.gotState = false
 			return m, nil
 		}
-		switch msg.String() {
-		case "ctrl+c", "q":
-			return m, tea.Quit
-		case "?":
-			m.overlay = "help"
-		case "b":
-			m.overlay = "shortcut"
-		case "up", "left":
-			if m.focus > 0 {
-				m.focus--
-			}
-		case "down", "right", "tab":
-			if m.focus < 3 {
-				m.focus++
-			} else {
-				m.focus = 0
-			}
-		case "t":
-			return m, action(m.paths, "toggle")
-		case "s":
-			return m, setupAction(m.paths)
-		case "d":
-			return m, serviceAction("disable", "--now", "sasayaki.service")
-		case "enter":
-			switch m.focus {
-			case 0:
-				return m, action(m.paths, "toggle")
-			case 1:
-				return m, setupAction(m.paths)
-			case 2:
-				m.overlay = "shortcut"
-			case 3:
-				return m, serviceAction("restart", "sasayaki.service")
-			}
+		m.state = msg.state
+		m.gotState = true
+		return m, nil
+
+	case toggleMsg:
+		if msg.err != nil {
+			m.showNotice(msg.err.Error())
+			return m, nil
 		}
+		if msg.state != nil {
+			m.state = msg.state
+			m.gotState = true
+		}
+		if msg.notice != "" {
+			m.showNotice(msg.notice)
+		}
+		return m, nil
+
+	case noticeMsg:
+		m.showNotice(msg.text)
+		return m, nil
+
+	case setupProgressMsg:
+		m.setupLines = append(m.setupLines, msg.line)
+		// Re-arm the stream for the next progress line.
+		return m, func() tea.Msg { return <-m.setupCh }
+
+	case setupDoneMsg:
+		m.setupBusy = false
+		m.setupCh = nil
+		m.setupLines = append(m.setupLines, summaryLine(msg))
+		if msg.err != nil {
+			m.setupLines = append(m.setupLines, "setup failed: "+msg.err.Error())
+		}
+		m.showNotice("setup " + outcomeWord(msg))
+		return m, nil
+
+	case logsMsg:
+		m.logs = msg.lines
+		return m, nil
+
+	case diagMsg:
+		m.diag = msg.report
+		m.diagDone = true
+		return m, nil
+
+	case tea.KeyMsg:
+		return m.handleKey(msg)
 	}
 	return m, nil
 }
 
-func (m Model) View() string {
-	if m.width == 0 {
-		return ""
+func summaryLine(msg setupDoneMsg) string {
+	if msg.err != nil {
+		return "setup stopped: " + msg.err.Error()
 	}
-	maxWidth := min(m.width-4, 118)
-	if maxWidth < 40 {
-		maxWidth = m.width
+	if msg.result.AllOK() {
+		skipped := fmt.Sprintf("%d skipped", msg.result.Skipped)
+		return "setup complete — " + skipped
 	}
-	head := title.Render("✦  sasayaki") + "  " + dim.Render("local voice input")
-	status := dim.Render("○ SETUP NEEDED")
-	if m.state != nil && m.state.Service == "running" {
-		status = ok.Render("● READY")
-	}
-	head = lipgloss.JoinHorizontal(lipgloss.Top, head, strings.Repeat(" ", max(1, maxWidth-lipgloss.Width(head)-lipgloss.Width(status))), status)
-	subtitle := dim.Render("Speak naturally. Sasayaki transcribes locally and pastes where you are typing.")
-	left := m.card("VOICE", []string{
-		m.row(0, "◆ RECORDING", recordingText(m.state)),
-		"", m.row(2, "◆ SHORTCUT", "Bind: sasayaki toggle"),
-		"", dim.Render("Toggle once to record, again to transcribe."),
-	}, 0)
-	right := m.card("RUNTIME", []string{
-		m.row(1, "◆ LOCAL ENGINE", readiness(m.state)),
-		"", m.row(3, "◆ SERVICE", serviceText(m.state)),
-		"", dim.Render("Model, private Python runtime and user service."),
-	}, 2)
-	content := ""
-	if maxWidth >= 78 {
-		content = lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right)
-	} else {
-		content = left + "\n\n" + right
-	}
-	footer := focus.Render("[T]") + dim.Render(" toggle  ") + focus.Render("[S]") + dim.Render(" setup  ") + focus.Render("[B]") + dim.Render(" shortcut  ") + focus.Render("[?]") + dim.Render(" help  ") + focus.Render("[Q]") + dim.Render(" quit")
-	if m.notice != "" {
-		footer = alert.Render(m.notice)
-	}
-	view := head + "\n" + subtitle + "\n\n" + content + "\n\n" + lipgloss.PlaceHorizontal(maxWidth, lipgloss.Center, footer)
-	view = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, view)
-	if m.overlay != "" {
-		return overlay(m.width, m.height, m.overlay)
-	}
-	return view
+	return "setup incomplete: " + strings.Join(msg.result.Failed, ", ")
 }
 
-func (m Model) card(name string, lines []string, focusIndex int) string {
-	width := 56
-	if m.width < 78 {
-		width = max(34, min(m.width-4, 64))
-	} else {
-		width = (min(m.width-4, 118) - 2) / 2
+func outcomeWord(msg setupDoneMsg) string {
+	if msg.err != nil {
+		return "failed"
 	}
-	body := strings.Join(lines, "\n")
-	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(violet).Width(width).Height(12).Padding(0, 1).Render(title.Render(name) + "\n" + body)
+	if msg.result.AllOK() {
+		return "complete"
+	}
+	return "incomplete"
 }
 
-func (m Model) row(index int, label, value string) string {
-	labelStyle := dim
-	if index == m.focus {
-		labelStyle = focus
-	}
-	return labelStyle.Render(label) + "\n" + "  " + value
-}
+// handleKey implements the full key contract: letters for significant
+// actions, arrows/Tab for spatial focus, Enter for the focused action,
+// Esc to close overlays, Q to quit.
+func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
 
-func recordingText(s *protocol.State) string {
-	if s != nil && s.Recording {
-		return alert.Render("● Listening — press toggle to finish")
-	}
-	return ok.Render("● Ready to listen")
-}
-func serviceText(s *protocol.State) string {
-	if s != nil && s.Service == "running" {
-		return ok.Render("● Running")
-	}
-	return alert.Render("○ Not running")
-}
-func readiness(s *protocol.State) string {
-	if s != nil && s.Model && s.Runtime {
-		return ok.Render("● SenseVoice installed")
-	}
-	return alert.Render("○ Setup required")
-}
-
-func overlay(width, height int, name string) string {
-	var text string
-	if name == "shortcut" {
-		text = title.Render("Global shortcut") + "\n\n" + "Bind this command in your desktop's keyboard settings:\n\n" + focus.Render("  sasayaki toggle") + "\n\n" + dim.Render("KDE: System Settings → Shortcuts\nGNOME: Settings → Keyboard → Custom Shortcuts\nHyprland/Sway: bind the command in your compositor config.\n\nEsc closes this guide.")
-	} else {
-		text = title.Render("Sasayaki help") + "\n\n" + "T  start or finish recording\nS  install or repair local runtime and service\nB  show global shortcut instructions\nD  stop and disable the user service\nArrows / Tab  move focus\nQ  quit\n\n" + dim.Render("All speech remains local. Esc closes this help.")
-	}
-	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(violet).Background(lipgloss.Color("235")).Padding(1, 2).Width(min(width-8, 76)).Render(text)
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box)
-}
-
-func refresh(p config.Paths) tea.Cmd {
-	return func() tea.Msg { r, err := service.Request(p, "status"); return statusMsg{state: r.State, err: err} }
-}
-func action(p config.Paths, operation string) tea.Cmd {
-	return func() tea.Msg {
-		r, err := service.Request(p, operation)
-		if err != nil {
-			return noticeMsg(err.Error())
+	if m.overlay == overlayConfirm {
+		switch key {
+		case "y", "Y", "enter":
+			m.overlay = overlayNone
+			m.showNotice("Stopping the service…")
+			return m, stopServiceCmd()
+		case "n", "N", "esc", "q", "Q":
+			m.overlay = overlayNone
+			return m, nil
 		}
-		return noticeMsg(r.Message)
+		return m, nil
 	}
-}
-func setupAction(p config.Paths) tea.Cmd {
-	return func() tea.Msg {
-		binary, err := exec.LookPath("sasayaki")
-		if err != nil {
-			return noticeMsg("Run setup from the installed sasayaki binary")
+
+	if m.overlay != overlayNone {
+		switch key {
+		case "esc":
+			m.overlay = overlayNone
+		case "q", "Q":
+			if m.overlay == overlayHelp || m.overlay == overlayKeys {
+				m.overlay = overlayNone
+			}
+		case "up", "k":
+			if m.overlay == overlayLogs {
+				m.scrollLogs(-1)
+			}
+		case "down", "j":
+			if m.overlay == overlayLogs {
+				m.scrollLogs(1)
+			}
 		}
-		err = setup.Run(p, binary, func(string) {})
-		if err != nil {
-			return noticeMsg("Setup failed: " + err.Error())
-		}
-		return noticeMsg("Setup complete — Sasayaki is ready")
+		return m, nil
+	}
+
+	switch key {
+	case "q", "Q", "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		return m, nil
+	case "t", "T":
+		return m, toggleCmd(m.paths)
+	case "s", "S":
+		return m.startSetup()
+	case "d", "D":
+		m.overlay = overlayConfirm
+		return m, nil
+	case "b", "B":
+		m.overlay = overlayKeys
+		return m, nil
+	case "L":
+		m.overlay = overlayLogs
+		return m, logsCmd()
+	case "?":
+		m.overlay = overlayHelp
+		return m, nil
+	case "left", "h":
+		m.focus = moveFocus("left", m.focus)
+	case "right", "l":
+		m.focus = moveFocus("right", m.focus)
+	case "up", "k":
+		m.focus = moveFocus("up", m.focus)
+	case "down", "j":
+		m.focus = moveFocus("down", m.focus)
+	case "tab":
+		m.focus = moveFocus("tab", m.focus)
+	case "enter", " ":
+		return m.activateFocused()
+	}
+	return m, nil
+}
+
+func (m *Model) showNotice(text string) {
+	m.notice = text
+	m.noticeUntil = time.Now().Add(6 * time.Second)
+}
+
+// activateFocused runs the harmless action under the focus.
+func (m Model) activateFocused() (tea.Model, tea.Cmd) {
+	switch m.focus {
+	case focusRecord:
+		return m, toggleCmd(m.paths)
+	case focusShortcut:
+		m.overlay = overlayKeys
+		return m, nil
+	case focusSetup:
+		return m.startSetup()
+	case focusDiagnose:
+		m.overlay = overlayDiag
+		m.diagDone = false
+		return m, diagCmd(m.paths)
+	case focusLogs:
+		m.overlay = overlayLogs
+		return m, logsCmd()
+	}
+	return m, nil
+}
+
+// startSetup opens the setup overlay and streams progress.
+func (m Model) startSetup() (tea.Model, tea.Cmd) {
+	if m.setupBusy {
+		m.showNotice("Setup is already running")
+		return m, nil
+	}
+	m.overlay = overlaySetup
+	m.setupBusy = true
+	m.setupLines = nil
+	ch := make(chan tea.Msg, 128)
+	go runSetupGoroutine(m.paths, ch)
+	m.setupCh = ch
+	return m, func() tea.Msg { return <-ch }
+}
+
+func (m *Model) scrollLogs(delta int) {
+	visible := m.logsVisible()
+	max := len(m.logs) - visible
+	if max < 0 {
+		max = 0
+	}
+	m.logScroll += delta
+	if m.logScroll < 0 {
+		m.logScroll = 0
+	}
+	if m.logScroll > max {
+		m.logScroll = max
 	}
 }
-func serviceAction(args ...string) tea.Cmd {
-	return func() tea.Msg {
-		if err := service.Systemctl(args...); err != nil {
-			return noticeMsg(err.Error())
-		}
-		return noticeMsg("Service updated")
-	}
+
+// logsVisible returns how many log lines fit in the logs overlay.
+func (m Model) logsVisible() int {
+	return maxInt(m.height-6, 4)
 }
-func clearNotice() tea.Cmd {
-	return tea.Tick(4*time.Second, func(time.Time) tea.Msg { return noticeMsg("") })
-}
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-func max(a, b int) int {
+
+func maxInt(a, b int) int {
 	if a > b {
 		return a
 	}
 	return b
 }
 
-func Run(paths config.Paths) error {
-	_, err := tea.NewProgram(New(paths), tea.WithAltScreen()).Run()
-	return err
+// pollState fetches a fresh snapshot from the control socket.
+func pollState(m Model) tea.Cmd {
+	return func() tea.Msg {
+		response, err := service.Request(m.paths, "status")
+		if err != nil {
+			return stateMsg{err: err}
+		}
+		return stateMsg{state: response.State}
+	}
 }
 
-var _ = fmt.Sprint
+func tick() tea.Cmd {
+	return tea.Tick(2*time.Second, func(time.Time) tea.Msg { return tickMsg{} })
+}
+
+func toggleCmd(paths config.Paths) tea.Cmd {
+	return func() tea.Msg {
+		response, err := service.Request(paths, "toggle")
+		if err != nil {
+			return toggleMsg{err: err}
+		}
+		notice := response.Message
+		if !response.OK && response.Error != nil {
+			notice = response.Error.Detail
+		}
+		return toggleMsg{notice: notice, state: response.State}
+	}
+}
+
+func stopServiceCmd() tea.Cmd {
+	return func() tea.Msg {
+		if err := service.Systemctl("stop", "sasayaki.service"); err != nil {
+			return noticeMsg{text: "Could not stop the service: " + err.Error()}
+		}
+		return noticeMsg{text: "Service stopped"}
+	}
+}
+
+func logsCmd() tea.Cmd {
+	return func() tea.Msg {
+		output, err := journal()
+		if err != nil {
+			return logsMsg{lines: []string{"could not read the service log: " + err.Error()}}
+		}
+		lines := strings.Split(strings.TrimRight(string(output), "\n"), "\n")
+		return logsMsg{lines: lines}
+	}
+}
+
+// journal is stubbable in tests.
+var journal = func() ([]byte, error) {
+	cmd := exec.Command("journalctl", "--user", "-u", "sasayaki.service", "-n", "200", "--no-pager", "-o", "short-iso")
+	return cmd.Output()
+}
+
+func diagCmd(paths config.Paths) tea.Cmd {
+	return func() tea.Msg {
+		report := diagnostics.All(paths)
+		return diagMsg{report: report}
+	}
+}
+
+// runSetupGoroutine executes setup off the update loop and streams progress
+// lines into msgs. It closes msgs after the final result.
+func runSetupGoroutine(paths config.Paths, msgs chan<- tea.Msg) {
+	defer close(msgs)
+	binary, err := exec.LookPath("sasayaki")
+	if err != nil {
+		msgs <- setupDoneMsg{err: fmt.Errorf("run `sasayaki setup` from the installed binary: %w", err)}
+		return
+	}
+	setup.SetBinary(binary)
+	setup.SetProgress(func(line string) { msgs <- setupProgressMsg{line} })
+	session := setup.NewSession(paths)
+	result := session.Run()
+	msgs <- setupDoneMsg{result: result}
+}
