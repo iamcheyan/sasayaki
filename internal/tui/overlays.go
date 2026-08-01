@@ -51,7 +51,7 @@ func (m Model) helpBox() string {
 	rows := [][2]string{
 		{"t / T", "record: start or finish voice input"},
 		{"s / S", "setup: install or repair the local runtime"},
-		{"d / D", "stop the service (asks for confirmation)"},
+		{"d / D", "disable the service (asks for confirmation)"},
 		{"b / B", "shortcut: how to bind the toggle"},
 		{"l / L", "logs: recent service output"},
 		{"?", "this help"},

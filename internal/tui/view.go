@@ -294,7 +294,7 @@ func (m Model) footer() string {
 func (m Model) compactView() string {
 	title := m.theme.base().Foreground(m.theme.violet).Bold(true).Render("✦ sasayaki")
 	line := title + "   " + m.pill()
-	hint := m.theme.base().Foreground(m.theme.muted).Render("t record · s setup · d stop · ? help · q quit")
+	hint := m.theme.base().Foreground(m.theme.muted).Render("t record · s setup · d disable · ? help · q quit")
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
 		line+"\n"+hint)
 }

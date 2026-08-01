@@ -541,9 +541,16 @@ func (d *Daemon) handle(conn net.Conn) {
 		d.respond(conn, perr == nil, message, perr, d.State())
 	case protocol.OpDiagnose:
 		report := diagnostics.All(d.paths)
-		d.respond(conn, true, "", nil, d.State())
-		// Diagnostics travel in the response payload via a second message.
-		d.respondDiagnostics(conn, report)
+		// A request maps to exactly one response. Sending a second JSON object
+		// made generic protocol clients silently lose diagnostics after reading
+		// the status snapshot.
+		response := protocol.Response{
+			Version:     protocol.Version,
+			OK:          true,
+			State:       d.State(),
+			Diagnostics: report,
+		}
+		_ = json.NewEncoder(conn).Encode(response)
 	default:
 		d.respond(conn, false, "unknown operation",
 			protocol.NewError(protocol.ErrUnknownOperation, protocol.ClassUser, req.Operation), nil)
@@ -556,10 +563,6 @@ func (d *Daemon) respond(conn net.Conn, ok bool, message string, perr *protocol.
 		response.Error = perr
 	}
 	_ = json.NewEncoder(conn).Encode(response)
-}
-
-func (d *Daemon) respondDiagnostics(conn net.Conn, report diagnostics.Report) {
-	_ = json.NewEncoder(conn).Encode(protocol.Response{Version: protocol.Version, OK: true, Diagnostics: report})
 }
 
 // Request sends one operation to the running service and decodes the
@@ -586,14 +589,11 @@ func RequestWithTimeout(paths config.Paths, operation string, timeout time.Durat
 	if err := json.NewDecoder(reader).Decode(&response); err != nil {
 		return protocol.Response{}, err
 	}
-	if response.Diagnostics != nil {
-		return response, nil
-	}
 	return response, nil
 }
 
 // RequestDiagnose sends a diagnose request and returns the report carried in
-// the follow-up message.
+// its single versioned response.
 func RequestDiagnose(paths config.Paths) (diagnostics.Report, error) {
 	conn, err := net.DialTimeout("unix", paths.Socket(), 3*time.Second)
 	if err != nil {
@@ -603,17 +603,17 @@ func RequestDiagnose(paths config.Paths) (diagnostics.Report, error) {
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 	_ = json.NewEncoder(conn).Encode(protocol.Request{Version: protocol.Version, Operation: protocol.OpDiagnose})
 	reader := bufio.NewReader(conn)
-	// First message: the status response; the diagnostics report follows as
-	// a second protocol.Response carrying it in Diagnostics.
-	var status protocol.Response
-	if err := json.NewDecoder(reader).Decode(&status); err != nil {
+	var response protocol.Response
+	if err := json.NewDecoder(reader).Decode(&response); err != nil {
 		return diagnostics.Report{}, err
 	}
-	var wrapped protocol.Response
-	if err := json.NewDecoder(reader).Decode(&wrapped); err != nil {
-		return diagnostics.Report{}, err
+	if !response.OK {
+		if response.Error != nil {
+			return diagnostics.Report{}, fmt.Errorf("diagnose: %s", response.Error.Detail)
+		}
+		return diagnostics.Report{}, fmt.Errorf("diagnose request failed")
 	}
-	data, err := json.Marshal(wrapped.Diagnostics)
+	data, err := json.Marshal(response.Diagnostics)
 	if err != nil {
 		return diagnostics.Report{}, err
 	}

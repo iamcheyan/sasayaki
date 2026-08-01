@@ -210,6 +210,32 @@ func TestToggleHappyPath(t *testing.T) {
 	}
 }
 
+func TestDiagnoseUsesOneResponse(t *testing.T) {
+	paths := testPaths(t)
+	d, _, _, _ := testDaemon(t, paths)
+	left, right := net.Pipe()
+	defer left.Close()
+	defer right.Close()
+	go d.handle(right)
+	if err := json.NewEncoder(left).Encode(protocol.Request{Version: protocol.Version, Operation: protocol.OpDiagnose}); err != nil {
+		t.Fatal(err)
+	}
+	decoder := json.NewDecoder(left)
+	var response protocol.Response
+	if err := decoder.Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.OK || response.Diagnostics == nil || response.State == nil {
+		t.Fatalf("diagnose response should include state and diagnostics: %+v", response)
+	}
+	// The peer closes after one response. A second decode must not yield a
+	// second valid protocol message.
+	var unexpected protocol.Response
+	if err := decoder.Decode(&unexpected); err == nil {
+		t.Fatalf("diagnose must send exactly one response, got %+v", unexpected)
+	}
+}
+
 func TestToggleStartsANewRecordingAfterTerminalState(t *testing.T) {
 	paths := testPaths(t)
 	d, _, tr, pa := testDaemon(t, paths)
