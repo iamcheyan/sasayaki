@@ -81,7 +81,7 @@ func Plan(cfg config.Config) []*Step {
 				return "engine.py installed", nil
 			},
 			skip: func(p config.Paths) (bool, string) {
-				if fileExists(p.EngineScript()) {
+				if engine.ScriptCurrent(p) {
 					return true, "engine.py already present"
 				}
 				return false, ""

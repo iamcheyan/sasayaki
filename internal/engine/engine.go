@@ -23,5 +23,14 @@ func WriteScript(p config.Paths) error {
 	return os.WriteFile(p.EngineScript(), script, 0o700)
 }
 
+// ScriptCurrent reports whether the installed runtime is exactly the engine
+// embedded in this binary. Setup uses this rather than merely checking that a
+// file exists, so a new recognizer backend can never leave an old script in
+// place after an application upgrade.
+func ScriptCurrent(p config.Paths) bool {
+	b, err := os.ReadFile(p.EngineScript())
+	return err == nil && string(b) == string(script)
+}
+
 // Python returns the interpreter of Sasayaki's private virtualenv.
 func Python(p config.Paths) string { return filepath.Join(p.VenvDir(), "bin", "python") }
