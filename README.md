@@ -26,6 +26,12 @@ sasayaki setup
 sasayaki
 ```
 
+To build and install from source:
+
+```sh
+make install
+```
+
 Then bind the following command in KDE, GNOME, Hyprland, Sway, or another
 desktop's keyboard-shortcut settings:
 
@@ -72,3 +78,5 @@ go run ./cmd/sasayaki
 
 The visual language is documented in
 [docs/tui-design-language.md](docs/tui-design-language.md).
+The implementation boundary and desktop-integration decisions are in
+[docs/architecture.md](docs/architecture.md).
