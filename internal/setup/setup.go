@@ -1,112 +1,281 @@
+// Package setup provisions Sasayaki's private runtime, model and user
+// service. It is idempotent: re-running repairs missing or corrupt artifacts
+// without redownloading valid ones. Steps run in dependency order and the
+// report tells the user exactly what changed and what was skipped.
 package setup
 
 import (
 	"fmt"
-	"io"
-	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/iamcheyan/sasayaki/internal/config"
 	"github.com/iamcheyan/sasayaki/internal/engine"
-	"github.com/iamcheyan/sasayaki/internal/service"
+	"github.com/iamcheyan/sasayaki/internal/transcribe"
 )
 
-const modelBase = "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/"
+// StepStatus describes one setup step's outcome.
+type StepStatus string
 
-func Run(paths config.Paths, binary string, progress func(string)) error {
-	if err := paths.Ensure(); err != nil {
-		return err
-	}
-	if err := config.Save(paths, config.Config{Language: "auto"}); err != nil {
-		return err
-	}
-	if err := engine.WriteScript(paths); err != nil {
-		return err
-	}
-	if _, err := exec.LookPath("python3"); err != nil {
-		return fmt.Errorf("python3 is required")
-	}
-	if _, err := exec.LookPath("parecord"); err != nil {
-		return fmt.Errorf("parecord is required (install pulseaudio-utils)")
-	}
+const (
+	StepDone    StepStatus = "done"
+	StepSkipped StepStatus = "skipped"
+	StepFailed  StepStatus = "failed"
+)
 
-	if _, err := os.Stat(engine.Python(paths)); os.IsNotExist(err) {
-		progress("Creating Sasayaki's private Python runtime…")
-		if err := run("python3", "-m", "venv", paths.VenvDir()); err != nil {
-			return err
-		}
-		progress("Installing local speech runtime…")
-		if err := run(engine.Python(paths), "-m", "pip", "install", "--upgrade", "pip", "sherpa-onnx", "numpy"); err != nil {
-			return err
-		}
+// Step is one planned unit of setup work.
+type Step struct {
+	ID     string
+	Title  string
+	Status StepStatus
+	// Detail is a short human summary of what was done or why it was
+	// skipped; Error carries the failure message when Status is failed.
+	Detail string
+	Error  string
+	run    func(p config.Paths) (string, error)
+	// skip returns (true, reason) when the step has nothing to do.
+	skip func(p config.Paths) (bool, string)
+}
+
+// Plan is the ordered setup steps for the pinned model.
+func Plan() []*Step {
+	return []*Step{
+		{
+			ID: "prereqs", Title: "Checking prerequisites",
+			run: func(p config.Paths) (string, error) {
+				if err := checkPrereqs(p); err != nil {
+					return "", err
+				}
+				return "tools, disk space and network OK", nil
+			},
+		},
+		{
+			ID: "dirs", Title: "Creating private directories",
+			run: func(p config.Paths) (string, error) {
+				if err := p.Ensure(); err != nil {
+					return "", err
+				}
+				return "directories ready", nil
+			},
+		},
+		{
+			ID: "config", Title: "Writing configuration",
+			run: func(p config.Paths) (string, error) {
+				cfg, err := config.Load(p)
+				if err != nil {
+					cfg = config.Default()
+				}
+				if err := config.Save(p, cfg); err != nil {
+					return "", err
+				}
+				return "config.json ready", nil
+			},
+		},
+		{
+			ID: "engine", Title: "Installing the private engine script",
+			run: func(p config.Paths) (string, error) {
+				if err := engine.WriteScript(p); err != nil {
+					return "", err
+				}
+				return "engine.py installed", nil
+			},
+			skip: func(p config.Paths) (bool, string) {
+				if fileExists(p.EngineScript()) {
+					return true, "engine.py already present"
+				}
+				return false, ""
+			},
+		},
+		{
+			ID: "python", Title: "Checking python3",
+			run: func(p config.Paths) (string, error) {
+				if _, err := lookPath("python3"); err != nil {
+					return "", fmt.Errorf("python3 is required but not installed; install it (e.g. dnf install python3 / apt install python3) and re-run `sasayaki setup`")
+				}
+				return "python3 found", nil
+			},
+		},
+		{
+			ID: "venv", Title: "Creating the private Python runtime",
+			run: func(p config.Paths) (string, error) {
+				if _, err := lookPath("python3"); err != nil {
+					return "", fmt.Errorf("python3 not found")
+				}
+				if err := run("python3", "-m", "venv", p.VenvDir()); err != nil {
+					return "", err
+				}
+				return "virtual environment created", nil
+			},
+			skip: func(p config.Paths) (bool, string) {
+				if fileExists(filepath.Join(p.VenvDir(), "bin", "python")) && fileExists(p.VenvMarker()) {
+					return true, "runtime already installed"
+				}
+				return false, ""
+			},
+		},
+		{
+			ID: "packages", Title: "Installing pinned speech packages",
+			run: func(p config.Paths) (string, error) {
+				py := filepath.Join(p.VenvDir(), "bin", "python")
+				args := []string{"-m", "pip", "install", "--disable-pip-version-check", "-r", p.RequirementsFile()}
+				if err := os.MkdirAll(p.RuntimeDir(), 0o700); err != nil {
+					return "", err
+				}
+				if err := os.WriteFile(p.RequirementsFile(), []byte(PinnedRuntime), 0o600); err != nil {
+					return "", err
+				}
+				if err := run(py, args...); err != nil {
+					return "", err
+				}
+				// Mark the runtime complete only after packages are in.
+				if err := os.WriteFile(p.VenvMarker(), []byte("installed\n"), 0o600); err != nil {
+					return "", err
+				}
+				return "packages installed and runtime marked ready", nil
+			},
+			skip: func(p config.Paths) (bool, string) {
+				if fileExists(p.VenvMarker()) {
+					return true, "runtime already installed"
+				}
+				return false, ""
+			},
+		},
+		{
+			ID: "model", Title: "Downloading and verifying the SenseVoice model",
+			run: func(p config.Paths) (string, error) {
+				if err := os.MkdirAll(p.ModelDir(), 0o700); err != nil {
+					return "", err
+				}
+				return downloadModel(p, progress)
+			},
+			skip: func(p config.Paths) (bool, string) {
+				if transcribe.ModelValid(p) {
+					return true, "model files already verified"
+				}
+				return false, ""
+			},
+		},
+		{
+			ID: "service", Title: "Writing the user service unit",
+			run: func(p config.Paths) (string, error) {
+				return "service unit written", writeUnit(p, serviceBinary)
+			},
+			skip: func(p config.Paths) (bool, string) {
+				if unitCurrent(p) {
+					return true, "service unit already current"
+				}
+				return false, ""
+			},
+		},
+		{
+			ID: "systemd", Title: "Enabling and starting the user service",
+			run: func(p config.Paths) (string, error) {
+				if err := systemctl("daemon-reload"); err != nil {
+					return "", err
+				}
+				if err := systemctl("enable", "--now", "sasayaki.service"); err != nil {
+					return "", err
+				}
+				return "service enabled and started", nil
+			},
+		},
 	}
-	if err := os.MkdirAll(paths.ModelDir(), 0o700); err != nil {
-		return err
-	}
-	for _, name := range []string{"model.int8.onnx", "tokens.txt"} {
-		dest := filepath.Join(paths.ModelDir(), name)
-		if _, err := os.Stat(dest); os.IsNotExist(err) {
-			progress("Downloading SenseVoice " + name + "…")
-			if err := download(modelBase+name, dest); err != nil {
-				return err
+}
+
+// Session drives one setup run.
+type Session struct {
+	paths   config.Paths
+	steps   []*Step
+	results []StepResult
+}
+
+// StepResult is the final outcome of one step.
+type StepResult struct {
+	ID     string     `json:"id"`
+	Title  string     `json:"title"`
+	Status StepStatus `json:"status"`
+	Detail string     `json:"detail,omitempty"`
+	Error  string     `json:"error,omitempty"`
+}
+
+// PlanResult is the full setup outcome, ready for TUI rows or --json.
+type PlanResult struct {
+	Steps   []StepResult `json:"steps"`
+	Skipped int          `json:"skipped"`
+	Failed  []string     `json:"failed,omitempty"`
+}
+
+// AllOK reports whether every step completed or was skipped.
+func (r PlanResult) AllOK() bool { return len(r.Failed) == 0 }
+
+// NewSession builds a session for the given paths.
+func NewSession(paths config.Paths) *Session {
+	return &Session{paths: paths, steps: Plan()}
+}
+
+// Run executes the plan in order, stopping on the first failure so the user
+// always sees a coherent partial state and the failing step.
+func (s *Session) Run() PlanResult {
+	var result PlanResult
+	for _, step := range s.steps {
+		out := StepResult{ID: step.ID, Title: step.Title, Status: StepDone}
+		if step.skip != nil {
+			if skip, reason := step.skip(s.paths); skip {
+				out.Status = StepSkipped
+				out.Detail = reason
+				result.Skipped++
+				s.results = append(s.results, out)
+				result.Steps = append(result.Steps, out)
+				continue
 			}
 		}
+		detail, err := step.run(s.paths)
+		if err != nil {
+			out.Status = StepFailed
+			out.Error = err.Error()
+			result.Failed = append(result.Failed, step.ID)
+			s.results = append(s.results, out)
+			result.Steps = append(result.Steps, out)
+			return result
+		}
+		out.Detail = detail
+		s.results = append(s.results, out)
+		result.Steps = append(result.Steps, out)
 	}
-	progress("Installing Sasayaki user service…")
-	if err := installUnit(paths, binary); err != nil {
-		return err
-	}
-	if err := service.Systemctl("daemon-reload"); err != nil {
-		return err
-	}
-	if err := service.Systemctl("enable", "--now", "sasayaki.service"); err != nil {
-		return err
-	}
-	progress("Ready — bind `sasayaki toggle` in your desktop settings.")
-	return nil
+	return result
 }
 
-func installUnit(paths config.Paths, binary string) error {
-	if err := os.MkdirAll(filepath.Dir(paths.ServiceFile()), 0o700); err != nil {
-		return err
-	}
-	unit := "[Unit]\nDescription=Sasayaki local voice input\nAfter=graphical-session.target\n\n[Service]\nType=simple\nExecStart=" + binary + " serve\nRestart=on-failure\nRestartSec=2\n\n[Install]\nWantedBy=default.target\n"
-	return os.WriteFile(paths.ServiceFile(), []byte(unit), 0o600)
-}
+// Results returns the last run's step outcomes.
+func (s *Session) Results() []StepResult { return s.results }
 
-func run(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("%s: %w: %s", name, err, strings.TrimSpace(string(output)))
-	}
-	return nil
-}
+// progress receives one line of human progress.
+var progress = func(message string) {}
 
-func download(url, destination string) error {
-	response, err := http.Get(url)
+// SetProgress overrides the progress sink (used by the TUI and CLI).
+func SetProgress(fn func(string)) { progress = fn }
+
+// serviceBinary is resolved before a session runs; the TUI and CLI set it.
+var serviceBinary string
+
+// SetBinary tells setup which sasayaki binary the user unit must start.
+func SetBinary(path string) { serviceBinary = path }
+
+// unitCurrent reports whether the existing unit matches what setup would
+// write for the current binary.
+func unitCurrent(p config.Paths) bool {
+	if serviceBinary == "" {
+		return false
+	}
+	b, err := os.ReadFile(p.ServiceFile())
 	if err != nil {
-		return err
+		return false
 	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("download %s: %s", url, response.Status)
-	}
-	temp := destination + ".part"
-	f, err := os.OpenFile(temp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	_, copyErr := io.Copy(f, response.Body)
-	closeErr := f.Close()
-	if copyErr != nil {
-		_ = os.Remove(temp)
-		return copyErr
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	return os.Rename(temp, destination)
+	return strings.Contains(string(b), "ExecStart="+serviceBinary+" serve")
+}
+
+// fileExists is a tiny helper kept local to setup.
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
