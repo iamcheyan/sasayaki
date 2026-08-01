@@ -1,8 +1,22 @@
 #!/usr/bin/env python3
 """Small private SenseVoice command-line runtime used by Sasayaki."""
 import argparse
-import json
-import sys
+import re
+import wave
+
+
+def read_wave(path):
+    import numpy as np
+    with wave.open(path, "rb") as wav:
+        if wav.getnchannels() != 1 or wav.getsampwidth() != 2:
+            raise SystemExit("recording must be 16-bit mono WAV")
+        samples = np.frombuffer(wav.readframes(wav.getnframes()), dtype=np.int16)
+        return wav.getframerate(), samples.astype("float32") / 32768.0
+
+
+def clean(text):
+    # SenseVoice can prefix output with language/emotion markers.
+    return re.sub(r"<[^>]+>", "", text).strip()
 
 
 def transcribe(args):
@@ -19,10 +33,11 @@ def transcribe(args):
         use_itn=True,
         num_threads=4,
     )
+    sample_rate, samples = read_wave(args.wav)
     stream = recognizer.create_stream()
-    stream.accept_wave_file(args.wav)
+    stream.accept_waveform(sample_rate, samples)
     recognizer.decode_stream(stream)
-    print(stream.result.text.strip())
+    print(clean(stream.result.text))
 
 
 parser = argparse.ArgumentParser()
