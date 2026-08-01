@@ -49,12 +49,66 @@ portal-native push-to-talk can be added later where supported.
 sasayaki                 Open the control center
 sasayaki setup           Install the private runtime, model and user service
 sasayaki toggle          Start/stop recording through the running service
-sasayaki status          Print service and runtime status
+sasayaki status [--json] Print service and runtime state
+sasayaki diagnose [--json]
+                         Check prerequisites, runtime, model, microphone, paste
 sasayaki service start   Start the background service
 sasayaki service stop    Stop the background service
+sasayaki service restart Restart the background service
+sasayaki service status  Show whether the user service is running
 sasayaki shortcut        Show desktop-specific shortcut instructions
 sasayaki logs            Follow the user-service log
 ```
+
+Exit codes are predictable for scripting: `0` success, `1` operational
+failure (service down, setup incomplete, empty recording, …), `2` usage
+error.
+
+`status` and `diagnose` print JSON when given `--json`.
+
+## First run
+
+```sh
+sasayaki setup
+sasayaki
+```
+
+`setup` is transactional and idempotent: it checks prerequisites (python3,
+`parecord`, `wl-copy`, `wtype`, systemd user session, microphone, disk space,
+network), creates the private runtime, downloads and verifies the model
+against pinned SHA-256 checksums, installs the user service and enables it.
+Re-run it any time to repair a broken install (corrupt model files are
+re-downloaded).
+
+## Privacy
+
+Everything runs on this machine. Audio never leaves the device: recording is
+transcribed locally with SenseVoice and there are no network calls at
+runtime. The service journal logs metadata and errors only — not
+transcripts. To opt into full transcript logging, set `verbose_transcripts`
+in `~/.config/sasayaki/config.json` to `true`.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `toggle` prints "service is not running" | `sasayaki service start`, or `sasayaki setup` on first run |
+| `diagnose` shows a failed check | The `fix` field names the command; e.g. install `pulseaudio-utils` or start PipeWire/PulseAudio |
+| "microphone produced an empty recording" | Check input device/level; run `pactl list short sources` |
+| Model re-downloads on every setup | Corrupt model files; `sasayaki setup` repairs automatically |
+| Korean text looks over-spaced | Known SenseVoice limitation; text content is correct |
+| Nothing is pasted but clipboard was set | Paste backends unavailable (needs `wtype`/`ydotool`/`xdotool`); the failure state says so |
+
+## Removing
+
+```sh
+systemctl --user disable --now sasayaki.service
+rm ~/.config/systemd/user/sasayaki.service
+rm -rf ~/.config/sasayaki ~/.local/share/sasayaki ~/.local/state/sasayaki
+systemctl --user daemon-reload
+```
+
+This removes the config, model, private runtime and recordings.
 
 ## Files
 
@@ -79,7 +133,8 @@ go run ./cmd/sasayaki
 The visual language is documented in
 [docs/tui-design-language.md](docs/tui-design-language.md).
 The implementation boundary and desktop-integration decisions are in
-[docs/architecture.md](docs/architecture.md).
+[docs/architecture.md](docs/architecture.md). The speech model, checksums,
+measured latency and license are in [docs/model.md](docs/model.md).
 
 For a detailed engineering handoff/acceptance specification, see
 [docs/model-implementation-brief.md](docs/model-implementation-brief.md).
