@@ -6,6 +6,8 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -236,6 +238,44 @@ func TestDiagnoseUsesOneResponse(t *testing.T) {
 	}
 }
 
+// TestTestToggleDoesNotPaste guards the test overlay contract: recognition
+// only. Sasayaki never pastes during a test recording — clipboard and paste
+// shortcuts are other programs' interfaces — but the transcript must still
+// surface as the succeeded result.
+func TestTestToggleDoesNotPaste(t *testing.T) {
+	paths := testPaths(t)
+	d, _, _, pa := testDaemon(t, paths)
+
+	if _, perr := d.TestToggle(); perr != nil {
+		t.Fatal(perr)
+	}
+	if d.State().Phase != protocol.PhaseRecording {
+		t.Fatalf("phase = %q, want recording", d.State().Phase)
+	}
+	if _, perr := d.TestToggle(); perr != nil {
+		t.Fatal(perr)
+	}
+	waitFor(t, "succeeded phase", func() bool { return d.State().Phase == protocol.PhaseSucceeded })
+	if got := d.State().LastResult; got != "hello world" {
+		t.Fatalf("last result = %q, want the transcript", got)
+	}
+	if got := pa.pastedTexts(); len(got) != 0 {
+		t.Fatalf("test recording pasted %v; must never paste", got)
+	}
+
+	// A normal toggle after the test recording must paste again.
+	if _, perr := d.Toggle(); perr != nil {
+		t.Fatal(perr)
+	}
+	if _, perr := d.Toggle(); perr != nil {
+		t.Fatal(perr)
+	}
+	waitFor(t, "second succeeded phase", func() bool { return d.State().Phase == protocol.PhaseSucceeded })
+	if got := pa.pastedTexts(); len(got) != 1 {
+		t.Fatalf("paste count = %d, want 1 after a real toggle", len(got))
+	}
+}
+
 func TestToggleStartsANewRecordingAfterTerminalState(t *testing.T) {
 	paths := testPaths(t)
 	d, _, tr, pa := testDaemon(t, paths)
@@ -398,7 +438,7 @@ func TestPasteFailureTruthful(t *testing.T) {
 	}
 }
 
-func TestLastResultTruncated(t *testing.T) {
+func TestLastResultKeepsFullText(t *testing.T) {
 	paths := testPaths(t)
 	d, _, tr, _ := testDaemon(t, paths)
 	long := strings.Repeat("x", 200)
@@ -412,8 +452,98 @@ func TestLastResultTruncated(t *testing.T) {
 		t.Fatal(perr)
 	}
 	waitFor(t, "succeeded phase", func() bool { return d.State().Phase == protocol.PhaseSucceeded })
-	if got := d.State().LastResult; got != strings.Repeat("x", 60)+"…" {
-		t.Fatalf("LastResult not truncated to 60 runes: len=%d %q", len(got), got)
+	st := d.State()
+	if st.LastResult != long {
+		t.Fatalf("LastResult must carry the complete text: len=%d", len(st.LastResult))
+	}
+	if st.Transcript != long {
+		t.Fatalf("Transcript must carry the complete original text: len=%d", len(st.Transcript))
+	}
+}
+
+// Translation must not destroy the original transcript: the socket snapshot
+// keeps the complete pre-translation text in Transcript while LastResult
+// carries the complete translated text. Translation is only performed for
+// explicit translate-toggle requests.
+func TestTranslationKeepsOriginalTranscript(t *testing.T) {
+	paths := testPaths(t)
+	d, _, tr, _ := testDaemon(t, paths)
+	tr.text = "original speech text"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"翻訳されたテキスト"}}]}`)
+	}))
+	defer srv.Close()
+
+	d.cfg.Translation = config.TranslationConfig{
+		Enabled:        true,
+		BaseURL:        srv.URL,
+		Model:          "test-model",
+		APIKey:         "test-key",
+		TargetLanguage: "Japanese",
+	}
+
+	if _, perr := d.TranslateToggle(); perr != nil {
+		t.Fatal(perr)
+	}
+	if _, perr := d.TranslateToggle(); perr != nil {
+		t.Fatal(perr)
+	}
+	waitFor(t, "succeeded phase", func() bool { return d.State().Phase == protocol.PhaseSucceeded })
+	st := d.State()
+	if st.Transcript != "original speech text" {
+		t.Fatalf("Transcript = %q, want the original pre-translation text", st.Transcript)
+	}
+	if st.LastResult != "翻訳されたテキスト" {
+		t.Fatalf("LastResult = %q, want the complete translated text", st.LastResult)
+	}
+}
+
+// Plain toggles must never translate, even when translation is globally
+// enabled: translation is an explicit translate-toggle request only.
+func TestToggleDoesNotTranslate(t *testing.T) {
+	paths := testPaths(t)
+	d, _, tr, _ := testDaemon(t, paths)
+	tr.text = "raw recognition text"
+
+	d.cfg.Translation = config.TranslationConfig{
+		Enabled:        true,
+		BaseURL:        "http://127.0.0.1:1", // unreachable — must never be called
+		Model:          "test-model",
+		APIKey:         "test-key",
+		TargetLanguage: "Japanese",
+	}
+
+	if _, perr := d.Toggle(); perr != nil {
+		t.Fatal(perr)
+	}
+	if _, perr := d.Toggle(); perr != nil {
+		t.Fatal(perr)
+	}
+	waitFor(t, "succeeded phase", func() bool { return d.State().Phase == protocol.PhaseSucceeded })
+	st := d.State()
+	if st.LastResult != "raw recognition text" {
+		t.Fatalf("LastResult = %q, want the raw recognition text (no translation)", st.LastResult)
+	}
+}
+
+// translate-toggle fails fast with a user-facing error when translation is
+// globally disabled, instead of silently degrading to plain dictation.
+func TestTranslateToggleRequiresEnabled(t *testing.T) {
+	paths := testPaths(t)
+	d, _, _, _ := testDaemon(t, paths)
+	d.cfg.Translation.Enabled = false
+
+	_, perr := d.TranslateToggle()
+	if perr == nil {
+		t.Fatal("expected error when translation is disabled")
+	}
+	if perr.Code != protocol.ErrTranslationDisabled {
+		t.Fatalf("error code = %q, want %q", perr.Code, protocol.ErrTranslationDisabled)
+	}
+	if d.State().Phase != protocol.PhaseIdle {
+		t.Fatalf("phase = %q, want idle (no recording started)", d.State().Phase)
 	}
 }
 
@@ -683,5 +813,139 @@ func TestRequestWhenNoSocket(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "sasayaki service start") {
 		t.Fatalf("transport error should name the recovery command: %v", err)
+	}
+}
+
+// TestStateReadinessCached guards the performance fix for the test-overlay
+// lag: State() must not SHA-256 the ONNX model files on every call. The
+// readiness probes are cached with a TTL, so repeated calls within the TTL
+// reuse the cached snapshot instead of re-hashing.
+func TestStateReadinessCached(t *testing.T) {
+	d, _, _, _ := testDaemon(t, testPaths(t))
+
+	first := d.State()
+	if !first.Microphone {
+		t.Fatalf("first State: Microphone = false, want true (fake micOK)")
+	}
+	d.stateMu.Lock()
+	stampAfterFirst := d.readyAt
+	d.stateMu.Unlock()
+	if stampAfterFirst.IsZero() {
+		t.Fatal("first State() did not populate the readiness cache (readyAt zero)")
+	}
+
+	// Immediate second call: cache hit, readyAt must not move.
+	_ = d.State()
+	d.stateMu.Lock()
+	stampAfterSecond := d.readyAt
+	d.stateMu.Unlock()
+	if !stampAfterSecond.Equal(stampAfterFirst) {
+		t.Fatalf("second State() recomputed readiness (cache miss): readyAt %v -> %v", stampAfterFirst, stampAfterSecond)
+	}
+
+	// Age the cache past the TTL: the next State() must refresh readyAt.
+	d.stateMu.Lock()
+	d.readyAt = time.Now().Add(-readinessTTL - time.Second)
+	d.stateMu.Unlock()
+	_ = d.State()
+	d.stateMu.Lock()
+	stampAfterRefresh := d.readyAt
+	d.stateMu.Unlock()
+	if !stampAfterRefresh.After(stampAfterFirst) {
+		t.Fatalf("State() did not refresh stale readiness: readyAt %v not after %v", stampAfterRefresh, stampAfterFirst)
+	}
+}
+
+// --- mic level sampling ---
+
+func TestSampleMicLevel(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "capture.raw")
+
+	// Missing capture: not recording yet -> 0.
+	if got := sampleMicLevel(path); got != 0 {
+		t.Fatalf("missing capture should sample 0, got %d", got)
+	}
+
+	writeS16 := func(samples ...int16) {
+		t.Helper()
+		var buf []byte
+		for _, s := range samples {
+			buf = append(buf, byte(s), byte(s>>8))
+		}
+		if err := os.WriteFile(path, buf, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Too short (< 0.1s at 16 kHz): no level yet.
+	writeS16(make([]int16, 100)...)
+	if got := sampleMicLevel(path); got != 0 {
+		t.Fatalf("too-short capture should sample 0, got %d", got)
+	}
+
+	// A capture at full scale: 3200+ silent samples then a loud burst.
+	samples := make([]int16, 4000)
+	for i := 3000; i < 3100; i++ {
+		samples[i] = 12000
+	}
+	writeS16(samples...)
+	if got := sampleMicLevel(path); got != 100 {
+		t.Fatalf("peak 12000 should sample 100, got %d", got)
+	}
+
+	// Moderate speech: amplitude 1200 -> 10/100.
+	for i := range samples {
+		samples[i] = 0
+	}
+	for i := 0; i < 4000; i++ {
+		samples[i] = 1200
+	}
+	writeS16(samples...)
+	if got := sampleMicLevel(path); got != 10 {
+		t.Fatalf("peak 1200 should sample 10, got %d", got)
+	}
+
+	// Silence: 0.
+	for i := range samples {
+		samples[i] = 0
+	}
+	writeS16(samples...)
+	if got := sampleMicLevel(path); got != 0 {
+		t.Fatalf("silence should sample 0, got %d", got)
+	}
+}
+
+// State() reports the live mic level while recording, 0 otherwise, and the
+// capture is read safely (recordingPath is guarded by stateMu).
+func TestStateReportsMicLevelWhileRecording(t *testing.T) {
+	paths := testPaths(t)
+	d, rec, _, _ := testDaemon(t, paths)
+	_ = rec
+
+	d.stateMu.Lock()
+	d.phase = protocol.PhaseRecording
+	d.recordingPath = filepath.Join(t.TempDir(), "cap")
+	d.stateMu.Unlock()
+
+	// Loud capture -> level > 0 in State().
+	var buf []byte
+	for i := 0; i < 4000; i++ {
+		s := int16(6000)
+		buf = append(buf, byte(s), byte(s>>8))
+	}
+	if err := os.WriteFile(d.recordingPath+".raw", buf, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.State().MicLevel; got != 50 {
+		t.Fatalf("recording state should report mic level 50, got %d", got)
+	}
+
+	// Idle -> 0.
+	d.stateMu.Lock()
+	d.phase = protocol.PhaseIdle
+	d.stateMu.Unlock()
+	if got := d.State().MicLevel; got != 0 {
+		t.Fatalf("idle state should report mic level 0, got %d", got)
 	}
 }

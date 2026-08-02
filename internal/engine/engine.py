@@ -80,10 +80,9 @@ def emit(obj):
 
 def serve(args):
     recognizer = None
-    language = None
+    language = args.language if args.language else "auto"
     try:
-        recognizer = make_recognizer(args.model_dir, args.model_file, args.architecture, args.language)
-        language = args.language
+        recognizer = make_recognizer(args.model_dir, args.model_file, args.architecture, language)
     except Exception as exc:  # model missing or dependency not installed
         emit({"ready": False, "error": str(exc)})
         return 1
@@ -104,10 +103,7 @@ def serve(args):
             if command == "ping":
                 emit({"id": request_id, "ok": True, "language": language})
             elif command == "transcribe":
-                want = req.get("language") or language
-                # Paraformer has no per-request language setting. Rebuilding
-                # it is needless; SenseVoice keeps its existing language
-                # switch behavior.
+                want = req.get("language") if req.get("language") else "auto"
                 if want != language and args.architecture == "sensevoice":
                     recognizer = make_recognizer(args.model_dir, args.model_file, args.architecture, want)
                     language = want

@@ -7,8 +7,8 @@ package paste
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"os/exec"
-	"strings"
 )
 
 // Result reports exactly what a Paste call achieved.
@@ -39,7 +39,21 @@ func (execRunner) Run(name string, args ...string) ([]byte, error) {
 func (execRunner) RunStdin(name string, args []string, stdin []byte) ([]byte, error) {
 	cmd := exec.Command(name, args...)
 	cmd.Stdin = bytes.NewReader(stdin)
-	return cmd.CombinedOutput()
+	// Clipboard tools (wl-copy, xclip, xsel) fork a background daemon that
+	// holds the selection. CombinedOutput would block on EOF of the stdout
+	// pipe, which the forked daemon inherits — so it only returns when the
+	// daemon exits (i.e. when the clipboard is next replaced), not when the
+	// parent finishes. Routing stdout/stderr to /dev/null (a real FD, not a
+	// pipe) lets the daemon inherit something that never blocks us, so
+	// cmd.Run() returns as soon as the parent has set the clipboard.
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		return nil, fmt.Errorf("%s: open /dev/null: %w", name, err)
+	}
+	defer devnull.Close()
+	cmd.Stdout = devnull
+	cmd.Stderr = devnull
+	return nil, cmd.Run()
 }
 
 // Backends in preference order for injecting the paste chord.
@@ -103,10 +117,10 @@ func copyToClipboard(r runner, text string) (string, error) {
 		case ClipXsel:
 			args = []string{"--clipboard", "--input"}
 		}
-		if out, err := r.RunStdin(tool, args, []byte(text)); err == nil {
+		if _, err := r.RunStdin(tool, args, []byte(text)); err == nil {
 			return tool, nil
 		} else {
-			return "", fmt.Errorf("%s: %s", tool, strings.TrimSpace(string(out)))
+			return "", fmt.Errorf("%s: %v", tool, err)
 		}
 	}
 	return "", fmt.Errorf("no clipboard tool found")

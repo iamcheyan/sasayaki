@@ -14,12 +14,18 @@ import (
 
 // Defaults for configurable behavior.
 const (
-	DefaultLanguage     = "auto"
-	DefaultSpeechModel  = "sensevoice-int8"
-	DefaultShortcutMode = "toggle"
-	DefaultRetention    = 10 * time.Minute
-	MinRecording        = 300 * time.Millisecond
+	DefaultLanguage        = "auto"
+	DefaultSpeechModel     = "sensevoice-int8"
+	DefaultShortcutMode    = "toggle"
+	DefaultRetention       = 10 * time.Minute
+	MinRecording           = 300 * time.Millisecond
+	DefaultVoiceBinding    = "ALT + A"
+	DefaultTranslationBinding = "HANGUL"
 )
+
+// DefaultVoiceBindings are the Hyprland keybindings that trigger voice
+// input toggle when none are configured.
+var DefaultVoiceBindings = []string{DefaultVoiceBinding, "code:472"}
 
 // SupportedLanguages are the SenseVoice model languages accepted in config.
 var SupportedLanguages = []string{"auto", "zh", "ja", "en", "ko", "yue"}
@@ -64,6 +70,13 @@ type Config struct {
 	// Translation is optional. It targets any OpenAI-compatible chat endpoint
 	// and belongs solely to Sasayaki; it is never read from OpenCode/Sumika.
 	Translation TranslationConfig `json:"translation"`
+	// VoiceBindings are Hyprland keybindings that trigger voice toggle.
+	// Consumed by `sasayaki bindings` for desktop integration; ignored when
+	// running standalone. Empty means use the defaults below.
+	VoiceBindings []string `json:"voice_bindings,omitempty"`
+	// TranslationBinding is the Hyprland keybinding that triggers translated
+	// voice input. Empty means use the default.
+	TranslationBinding string `json:"translation_binding,omitempty"`
 }
 
 type TranslationConfig struct {
@@ -77,10 +90,12 @@ type TranslationConfig struct {
 // Default returns a configuration with documented defaults.
 func Default() Config {
 	return Config{
-		SpeechModel:  DefaultSpeechModel,
-		Language:     DefaultLanguage,
-		ShortcutMode: DefaultShortcutMode,
-		Retention:    Duration(DefaultRetention),
+		SpeechModel:        DefaultSpeechModel,
+		Language:           DefaultLanguage,
+		ShortcutMode:       DefaultShortcutMode,
+		Retention:          Duration(DefaultRetention),
+		VoiceBindings:      DefaultVoiceBindings,
+		TranslationBinding: DefaultTranslationBinding,
 	}
 }
 
@@ -99,8 +114,8 @@ func (c Config) Validate() error {
 		return errors.New("retention must not be negative")
 	}
 	if c.Translation.Enabled {
-		if c.Translation.BaseURL == "" || c.Translation.Model == "" || c.Translation.APIKey == "" || c.Translation.TargetLanguage == "" {
-			return errors.New("translation requires base_url, model, api_key and target_language when enabled")
+		if c.Translation.BaseURL == "" || c.Translation.Model == "" || c.Translation.TargetLanguage == "" {
+			return errors.New("translation requires base_url, model and target_language when enabled")
 		}
 	}
 	return nil

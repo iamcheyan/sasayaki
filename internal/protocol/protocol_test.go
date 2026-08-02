@@ -78,15 +78,14 @@ func TestErrorWireShape(t *testing.T) {
 }
 
 func TestStateWireShape(t *testing.T) {
-	// The socket snapshot never carries the full transcript: LastResult is
-	// a summary string the service truncates before publishing.
 	st := State{
 		Service:    ServiceRunning,
 		Phase:      PhaseSucceeded,
 		Runtime:    true,
 		Model:      true,
 		Worker:     WorkerWarm,
-		LastResult: "Pasted with wtype",
+		LastResult: "translated text",
+		Transcript: "original speech",
 		LastPhase:  PhaseSucceeded,
 	}
 	data, err := json.Marshal(st)
@@ -105,6 +104,9 @@ func TestStateWireShape(t *testing.T) {
 	// LastResult must be a string (never an object carrying text).
 	if _, ok := raw["last_result"].(string); !ok {
 		t.Fatalf("last_result must be a plain string: %s", data)
+	}
+	if got, ok := raw["transcript"].(string); !ok || got != "original speech" {
+		t.Fatalf("transcript must be the complete original text as a string: %s", data)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/iamcheyan/sasayaki/internal/config"
@@ -17,11 +18,55 @@ import (
 // downloadClient is overridable in tests.
 var downloadClient = &http.Client{Timeout: 30 * time.Minute}
 
-// downloadFile fetches url into destination via a .part file, resuming any
-// existing partial download. The destination is replaced only after the body
-// downloads fully and matches wantSHA; interrupted downloads never corrupt a
-// valid file and leave a resumable .part behind.
-func downloadFile(url, destination, wantSHA string) error {
+type progressWriter struct {
+	writer     io.Writer
+	total      int64
+	downloaded int64
+	fileName   string
+	lastReport time.Time
+	progressFn func(string)
+}
+
+func (pw *progressWriter) Write(p []byte) (int, error) {
+	n, err := pw.writer.Write(p)
+	pw.downloaded += int64(n)
+	now := time.Now()
+	if pw.progressFn != nil && (now.Sub(pw.lastReport) >= 200*time.Millisecond || (pw.total > 0 && pw.downloaded >= pw.total)) {
+		pw.lastReport = now
+		pct := 0
+		if pw.total > 0 {
+			pct = int(float64(pw.downloaded) / float64(pw.total) * 100)
+		}
+		if pct > 100 {
+			pct = 100
+		}
+		mbDone := float64(pw.downloaded) / (1024 * 1024)
+		mbTotal := float64(pw.total) / (1024 * 1024)
+
+		barWidth := 20
+		filled := (pct * barWidth) / 100
+		if filled > barWidth {
+			filled = barWidth
+		}
+		bar := strings.Repeat("=", filled)
+		if filled < barWidth {
+			bar += ">" + strings.Repeat(" ", barWidth-filled-1)
+		} else {
+			bar = strings.Repeat("=", barWidth)
+		}
+
+		var msg string
+		if pw.total > 0 {
+			msg = fmt.Sprintf("Downloading %s: %.1f/%.1f MB [%s] %d%%", pw.fileName, mbDone, mbTotal, bar, pct)
+		} else {
+			msg = fmt.Sprintf("Downloading %s: %.1f MB", pw.fileName, mbDone)
+		}
+		pw.progressFn(msg)
+	}
+	return n, err
+}
+
+func downloadFile(url, destination, wantSHA string, expectedSize int64, progress func(string)) error {
 	part := destination + ".part"
 	out, err := os.OpenFile(part, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
@@ -48,12 +93,20 @@ func downloadFile(url, destination, wantSHA string) error {
 	}
 	defer resp.Body.Close()
 
+	if expectedSize <= 0 && resp.ContentLength > 0 {
+		expectedSize = resp.ContentLength + offset
+	}
+
+	pw := &progressWriter{
+		writer:     out,
+		total:      expectedSize,
+		downloaded: offset,
+		fileName:   filepath.Base(destination),
+		progressFn: progress,
+	}
+
 	switch resp.StatusCode {
 	case http.StatusOK:
-		// A number of CDNs ignore Range requests. Appending a full response to
-		// an existing partial file makes the checksum mismatch forever. Start
-		// over safely when that happens; the known-good destination is still
-		// untouched until this new .part verifies.
 		if offset > 0 {
 			if err := out.Truncate(0); err != nil {
 				out.Close()
@@ -63,13 +116,14 @@ func downloadFile(url, destination, wantSHA string) error {
 				out.Close()
 				return err
 			}
+			pw.downloaded = 0
 		}
-		if _, err := io.Copy(out, resp.Body); err != nil {
+		if _, err := io.Copy(pw, resp.Body); err != nil {
 			out.Close()
 			return fmt.Errorf("downloading %s: %w", url, err)
 		}
 	case http.StatusPartialContent:
-		if _, err := io.Copy(out, resp.Body); err != nil {
+		if _, err := io.Copy(pw, resp.Body); err != nil {
 			out.Close()
 			return fmt.Errorf("downloading %s: %w", url, err)
 		}
@@ -83,17 +137,47 @@ func downloadFile(url, destination, wantSHA string) error {
 		return err
 	}
 
+	if progress != nil {
+		progress("Verifying SHA-256 checksum for " + filepath.Base(destination) + "…")
+	}
+
 	sum, err := sha256File(part)
 	if err != nil {
 		return err
 	}
 	if sum != wantSHA {
-		// Do not preserve a known-corrupt prefix: a subsequent resume would
-		// append to it and could never produce a valid model file.
 		_ = os.Remove(part)
 		return fmt.Errorf("checksum mismatch for %s: download is corrupt; re-run `sasayaki setup` to retry", filepath.Base(destination))
 	}
 	return nil
+}
+
+func downloadModel(p config.Paths, modelID string, progress func(string)) (string, error) {
+	var downloaded []string
+	files := transcribe.ModelFiles(modelID)
+	if len(files) == 0 {
+		return "", fmt.Errorf("unknown speech model %q", modelID)
+	}
+	for _, f := range files {
+		dest := filepath.Join(transcribe.ModelDir(p, modelID), f.Name)
+		if fileValid(dest, f.SHA256) {
+			continue
+		}
+		if progress != nil {
+			progress("Downloading " + f.Name + "…")
+		}
+		if err := downloadFile(transcribe.ModelSource(modelID)+f.Name, dest, f.SHA256, f.Size, progress); err != nil {
+			return "", err
+		}
+		if err := os.Rename(dest+".part", dest); err != nil {
+			return "", err
+		}
+		downloaded = append(downloaded, f.Name)
+	}
+	if len(downloaded) == 0 {
+		return "model files already verified", nil
+	}
+	return "downloaded and verified: " + join(downloaded), nil
 }
 
 func sha256File(path string) (string, error) {
@@ -107,35 +191,6 @@ func sha256File(path string) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
-// downloadModel downloads every manifest file that is missing or corrupt and
-// atomically renames the verified .part file into place. Skipped (already
-// valid) files keep their original mtime.
-func downloadModel(p config.Paths, modelID string, progress func(string)) (string, error) {
-	var downloaded []string
-	files := transcribe.ModelFiles(modelID)
-	if len(files) == 0 {
-		return "", fmt.Errorf("unknown speech model %q", modelID)
-	}
-	for _, f := range files {
-		dest := filepath.Join(transcribe.ModelDir(p, modelID), f.Name)
-		if fileValid(dest, f.SHA256) {
-			continue
-		}
-		progress("Downloading " + f.Name + "…")
-		if err := downloadFile(transcribe.ModelSource(modelID)+f.Name, dest, f.SHA256); err != nil {
-			return "", err
-		}
-		if err := os.Rename(dest+".part", dest); err != nil {
-			return "", err
-		}
-		downloaded = append(downloaded, f.Name)
-	}
-	if len(downloaded) == 0 {
-		return "model files already verified", nil
-	}
-	return "downloaded and verified: " + join(downloaded), nil
 }
 
 func fileValid(path, wantSHA string) bool {

@@ -1,9 +1,11 @@
 package paste
 
 import (
+	"os/exec"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeRunner records every command and lets tests control LookPath results.
@@ -157,5 +159,24 @@ func TestAvailableAndBestBackend(t *testing.T) {
 	r2 := &fakeRunner{present: map[string]bool{"wl-copy": true}}
 	if Available(r2) {
 		t.Fatal("Available should be false without a paste backend")
+	}
+}
+
+// TestExecRunnerRunStdinDoesNotBlockOnForkingClipboard guards the fix for
+// the 28-second paste stall: wl-copy forks a background daemon that holds
+// the selection, and the old CombinedOutput blocked on that daemon's
+// inherited stdout pipe. The detached RunStdin must return as soon as the
+// wl-copy parent exits (well under the 2s bound; the old code took 7-31s).
+func TestExecRunnerRunStdinDoesNotBlockOnForkingClipboard(t *testing.T) {
+	if _, err := exec.LookPath("wl-copy"); err != nil {
+		t.Skip("wl-copy not installed")
+	}
+	r := execRunner{}
+	start := time.Now()
+	if _, err := r.RunStdin("wl-copy", []string{"--trim-newline"}, []byte("detach-timing-probe")); err != nil {
+		t.Fatalf("wl-copy failed: %v", err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("RunStdin blocked for %v; the forking clipboard daemon held the pipe", d)
 	}
 }

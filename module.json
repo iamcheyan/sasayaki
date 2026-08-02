@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 2,
+  "id": "sasayaki",
+  "name": "Sasayaki Voice Input",
+  "version": "1.0.0",
+  "kind": "shared",
+  "actionsProvider": "module-actions.qml",
+  "description": "Local voice input and speech-to-text (Go)",
+  "contributes": {
+    "widgets": [
+      {"id": "sasayaki-bar-button", "name": "Sasayaki", "slot": "right", "component": "bar/SasayakiButton.qml", "order": 55}
+    ],
+    "popupSections": [
+      {"id": "sasayaki-popup", "type": "sasayaki", "name": "Voice Input", "component": "popup/SasayakiPopup.qml"}
+    ],
+    "settingsPages": [
+      {"id": "sasayaki", "title": "Voice Input", "component": "settings/SasayakiPage.qml", "icon": "keyboard_voice", "order": 50}
+    ]
+  }
+}

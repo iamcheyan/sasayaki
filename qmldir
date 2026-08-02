@@ -1,0 +1,3 @@
+module qs.modules.sasayaki
+singleton SasayakiInput 1.0 SasayakiInput.qml
+SasayakiPage 1.0 settings/SasayakiPage.qml

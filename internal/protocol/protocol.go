@@ -9,10 +9,14 @@ const Version = 1
 
 // Operations supported by the service.
 const (
-	OpStatus   = "status"
-	OpToggle   = "toggle"
-	OpCancel   = "cancel"
-	OpDiagnose = "diagnose"
+	OpStatus          = "status"
+	OpToggle          = "toggle"
+	OpTranslateToggle = "translate-toggle"
+	OpTestToggle      = "test-toggle"
+	OpTestSpeech      = "test-speech"
+	OpTestTranslation = "test-translation"
+	OpCancel          = "cancel"
+	OpDiagnose        = "diagnose"
 )
 
 // Service states reported in State.Service.
@@ -41,6 +45,7 @@ const (
 	ErrEmptySpeech       = "empty_speech"
 	ErrModelFailed       = "model_failed"
 	ErrTranslationFailed = "translation_failed"
+	ErrTranslationDisabled = "translation_disabled"
 	ErrPasteFailed       = "paste_failed"
 	ErrNotReady          = "not_ready"
 	ErrInternal          = "internal"
@@ -130,9 +135,18 @@ type State struct {
 	// Worker is the model worker state: warm, starting or dead.
 	Worker string `json:"worker,omitempty"`
 
-	// Last operation result (transcript text, truncated for privacy in the
-	// socket snapshot) and error, with the phase it ended in.
+	// MicLevel is a live 0-100 peak-ish level of the in-progress recording,
+	// sampled from the capture while phase is recording. 0 when idle. Lets
+	// the test overlay show real-time audio feedback like the reference UI.
+	MicLevel int `json:"mic_level"`
+
+	// Last operation result (complete final text: the translation when
+	// translation is enabled, otherwise the transcript) and error, with the
+	// phase it ended in.
 	LastResult string `json:"last_result,omitempty"`
+	// Transcript is the complete original speech text of the last operation,
+	// before any translation. Empty until something was transcribed.
+	Transcript string `json:"transcript,omitempty"`
 	LastError  string `json:"last_error,omitempty"`
 	LastAt     string `json:"last_at,omitempty"`
 	LastPhase  Phase  `json:"last_phase,omitempty"`

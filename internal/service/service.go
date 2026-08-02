@@ -6,8 +6,10 @@ package service
 import (
 	"bufio"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -35,6 +37,13 @@ const (
 	transcribeTimeout = 2 * time.Minute
 	warmTimeout       = 45 * time.Second
 	cleanupInterval   = 5 * time.Minute
+	// readinessTTL bounds how often State() re-runs the readiness probes.
+	// transcribe.ModelValidFor SHA-256s the ONNX model files (hundreds of
+	// MB); the test overlay polls State() every 300ms, so recomputing on
+	// every call thrashes the CPU and starves inference. 30s is safe: the
+	// model/runtime files only change via `sasayaki setup`, which restarts
+	// the daemon.
+	readinessTTL = 30 * time.Second
 )
 
 // Transcriber is the model runtime the service drives. transcribe.Worker is
@@ -78,19 +87,37 @@ type Daemon struct {
 	recorder       recording.Recorder
 	recordingPath  string
 	recordingStart time.Time
+	// testMode marks the current recording as a test overlay recording.
+	// testSpeechOnly forces speech-only recognition without LLM translation.
+	testMode       bool
+	testSpeechOnly bool
+	// opTranslate marks the current operation as an explicit translation
+	// request (translate-toggle). Plain toggles never translate, even when
+	// the global translation.enabled flag is set.
+	opTranslate bool
 	// generation identifies the active recording/transcription pipeline.
 	// Cancelling or starting a new recording invalidates older goroutines so
 	// a late model result can never paste into the next user's context.
 	generation          uint64
 	recordingGeneration uint64
 
-	phase      protocol.Phase
-	lastResult string
-	lastError  string
-	lastPhase  protocol.Phase
-	lastAt     time.Time
+	phase          protocol.Phase
+	lastResult     string
+	lastTranscript string
+	lastError      string
+	lastPhase      protocol.Phase
+	lastAt         time.Time
 
 	workerErr error
+
+	// Cached readiness probes, refreshed at most every readinessTTL. See
+	// the const comment for why these must not be recomputed per State().
+	readyAt      time.Time
+	runtimeOK    bool
+	modelOK      bool
+	microphoneOK bool
+	pasteOK      bool
+	pasteBackend string
 
 	done chan struct{}
 	once sync.Once
@@ -219,8 +246,11 @@ func (d *Daemon) startWorker() {
 
 // State returns a full snapshot of readiness and last operation.
 func (d *Daemon) State() *protocol.State {
+	// Sampling the recording tail needs the phase and the capture path; both
+	// are guarded by stateMu (startRecording writes them under it).
 	d.stateMu.Lock()
-	phase, lastResult, lastError := d.phase, d.lastResult, d.lastError
+	phase, recordingPath := d.phase, d.recordingPath
+	lastResult, lastTranscript, lastError := d.lastResult, d.lastTranscript, d.lastError
 	lastPhase, lastAt := d.lastPhase, d.lastAt
 	d.stateMu.Unlock()
 
@@ -234,20 +264,22 @@ func (d *Daemon) State() *protocol.State {
 		service = protocol.ServiceUnhealthy
 	}
 
+	runtimeOK, modelOK, micOK, pasteOK, pasteBackend := d.readiness()
 	s := &protocol.State{
 		Version:      protocol.Version,
 		Service:      service,
 		Phase:        phase,
-		Runtime:      transcribe.InstalledFor(d.paths, d.cfg.SpeechModel),
-		Model:        transcribe.ModelValidFor(d.paths, d.cfg.SpeechModel),
+		Runtime:      runtimeOK,
+		Model:        modelOK,
 		SpeechModel:  d.cfg.SpeechModel,
 		Language:     d.cfg.Language,
 		Translation:  translationState(d.cfg.Translation),
-		Microphone:   d.micOK(),
-		Paste:        paste.AvailableDefault(),
-		PasteBackend: paste.BestBackend(paste.DefaultRunner()),
+		Microphone:   micOK,
+		Paste:        pasteOK,
+		PasteBackend: pasteBackend,
 		Worker:       workerState,
 		LastResult:   lastResult,
+		Transcript:   lastTranscript,
 		LastError:    lastError,
 		LastAt:       formatTime(lastAt),
 		LastPhase:    lastPhase,
@@ -255,11 +287,132 @@ func (d *Daemon) State() *protocol.State {
 	if workerErr != "" {
 		s.LastError = workerErr // surfaced until next operation
 	}
+	if phase == protocol.PhaseRecording {
+		s.MicLevel = sampleMicLevel(recordingPath + ".raw")
+	}
 	return s
 }
 
-// Toggle implements the idle → recording → transcribing transitions.
+// sampleMicLevel reads the tail of an in-progress s16le mono capture and
+// returns a 0-100 peak-ish level, mirroring the reference UI's live audio
+// feedback. A missing or too-short capture yields 0. The last ~0.2s (6400
+// bytes at 16 kHz) is subsampled so every 150ms poll stays cheap.
+func sampleMicLevel(rawPath string) int {
+	f, err := os.Open(rawPath)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return 0
+	}
+	size := st.Size()
+	if size < 3200 { // need ~0.1s before reporting a level
+		return 0
+	}
+	nbytes := int64(6400)
+	if nbytes > size {
+		nbytes = size
+	}
+	if _, err := f.Seek(size-nbytes, io.SeekStart); err != nil {
+		return 0
+	}
+	raw := make([]byte, nbytes)
+	if _, err := io.ReadFull(f, raw); err != nil {
+		return 0
+	}
+	n := len(raw) / 2
+	step := n / 400
+	if step < 1 {
+		step = 1
+	}
+	var peak int16
+	for i := 0; i < n; i += step {
+		v := int16(binary.LittleEndian.Uint16(raw[i*2:]))
+		if v < 0 {
+			v = -v
+		}
+		if v > peak {
+			peak = v
+		}
+	}
+	level := int(peak) * 100 / 12000
+	if level > 100 {
+		level = 100
+	}
+	return level
+}
+
+// readiness returns the cached runtime/model/microphone/paste probes,
+// refreshing them when older than readinessTTL. Model verification hashes
+// the ONNX files, so this must not run on every State() call (the test
+// overlay polls at 300ms).
+func (d *Daemon) readiness() (runtime, model, mic, pasteAvail bool, pasteBackend string) {
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
+	if time.Since(d.readyAt) > readinessTTL {
+		model = transcribe.ModelValidFor(d.paths, d.cfg.SpeechModel)
+		runtime = model
+		if _, err := os.Stat(d.paths.EngineScript()); err != nil {
+			runtime = false
+		}
+		if _, err := os.Stat(d.paths.VenvMarker()); err != nil {
+			runtime = false
+		}
+		d.modelOK, d.runtimeOK = model, runtime
+		d.microphoneOK = d.micOK()
+		d.pasteOK = paste.AvailableDefault()
+		d.pasteBackend = paste.BestBackend(paste.DefaultRunner())
+		d.readyAt = time.Now()
+	}
+	return d.runtimeOK, d.modelOK, d.microphoneOK, d.pasteOK, d.pasteBackend
+}
+
+// Toggle implements the idle → recording → transcribing transitions for the
+// full pipeline: the result is pasted into the focused app. Plain toggles
+// never translate — translation is an explicit translate-toggle request.
 func (d *Daemon) Toggle() (string, *protocol.Error) {
+	return d.toggle(false, false, false)
+}
+
+// TranslateToggle is Toggle with translation forced on for this operation.
+// It fails fast when the global translation.enabled flag is off so the
+// binding never silently degrades to plain dictation. The flag is read from
+// disk so edits made in the control center take effect without a restart.
+func (d *Daemon) TranslateToggle() (string, *protocol.Error) {
+	if !d.translationEnabledFromDisk() {
+		return "", protocol.NewError(protocol.ErrTranslationDisabled, protocol.ClassUser,
+			"translation is disabled; enable it in the control center")
+	}
+	return d.toggle(false, false, true)
+}
+
+// translationEnabledFromDisk reports whether the translation feature is
+// enabled, preferring the on-disk config (fresh edits win) and falling back
+// to the in-memory snapshot when the file is unreadable.
+func (d *Daemon) translationEnabledFromDisk() bool {
+	if _, err := os.Stat(d.paths.ConfigFile()); err == nil {
+		if freshCfg, err := config.Load(d.paths); err == nil {
+			return freshCfg.Translation.Enabled
+		}
+	}
+	return d.cfg.Translation.Enabled
+}
+
+func (d *Daemon) TestToggle() (string, *protocol.Error) {
+	return d.toggle(true, true, false)
+}
+
+func (d *Daemon) TestToggleSpeech() (string, *protocol.Error) {
+	return d.toggle(true, true, false)
+}
+
+func (d *Daemon) TestToggleTranslation() (string, *protocol.Error) {
+	return d.toggle(true, false, true)
+}
+
+func (d *Daemon) toggle(test, speechOnly, translate bool) (string, *protocol.Error) {
 	d.opMu.Lock()
 	defer d.opMu.Unlock()
 
@@ -267,9 +420,9 @@ func (d *Daemon) Toggle() (string, *protocol.Error) {
 	case protocol.PhaseRecording:
 		return d.finishRecording()
 	case protocol.PhaseIdle, protocol.PhaseSucceeded, protocol.PhaseFailed:
-		// Succeeded and failed are terminal snapshots, not locked states. The
-		// next toggle must begin a fresh recording while preserving the prior
-		// result/error in Last* fields for the TUI and status command.
+		d.testMode = test
+		d.testSpeechOnly = speechOnly
+		d.opTranslate = translate
 		return d.startRecording()
 	default:
 		return "", protocol.NewError(protocol.ErrStillTranscribing, protocol.ClassUser,
@@ -311,14 +464,18 @@ func (d *Daemon) startRecording() (string, *protocol.Error) {
 			"could not start the microphone: "+err.Error())
 	}
 	d.recorder = rec
+	d.stateMu.Lock()
 	d.recordingPath = path
 	d.recordingStart = time.Now()
-	d.stateMu.Lock()
 	d.generation++
 	d.recordingGeneration = d.generation
 	d.stateMu.Unlock()
 	d.setPhase(protocol.PhaseRecording, "", "")
-	d.log.Info("recording started")
+	mode := "real"
+	if d.testMode {
+		mode = "test"
+	}
+	d.log.Info("recording started — speak into the mic", "mode", mode)
 	return "Recording — press the shortcut again when you are done", nil
 }
 
@@ -329,25 +486,30 @@ func (d *Daemon) finishRecording() (string, *protocol.Error) {
 	if err != nil {
 		_ = os.Remove(path)
 		d.setPhase(protocol.PhaseFailed, "", "microphone error: "+err.Error())
+		d.setTranscript("")
 		d.log.Error("recording failed", "error", err)
 		return "", protocol.NewError(protocol.ErrMicrophoneFailed, protocol.ClassService, err.Error())
 	}
 	if duration < config.MinRecording {
 		_ = os.Remove(path)
 		d.setPhase(protocol.PhaseFailed, "", fmt.Sprintf("recording too short (%s)", duration.Round(time.Millisecond)))
+		d.setTranscript("")
 		return "", protocol.NewError(protocol.ErrTooShort, protocol.ClassUser,
 			fmt.Sprintf("Recording was too short (%s); nothing was transcribed", duration.Round(time.Millisecond)))
 	}
-	d.log.Info("recording finished", "duration", duration.String())
+	d.log.Info("recording finished — transcribing…", "duration", duration.String())
 
 	// Transcription runs asynchronously so the socket returns promptly.
-	go d.runTranscription(path, generation)
+	// Test recordings never paste; real ones run the full pipeline.
+	go d.runTranscription(path, generation, !d.testMode)
 	return "Recording stopped — transcribing…", nil
 }
 
-// runTranscription executes the transcribe → paste pipeline and records the
-// final phase. It must be called with d.opMu released.
-func (d *Daemon) runTranscription(path string, generation uint64) {
+// runTranscription executes the transcribe → (paste) pipeline and records
+// the final phase. Test recordings (paste=false) stop after transcription:
+// the result is exposed for the test overlay and nothing is pasted. It must
+// be called with d.opMu released.
+func (d *Daemon) runTranscription(path string, generation uint64, paste bool) {
 	d.opMu.Lock()
 	if !d.currentOperation(generation) {
 		d.opMu.Unlock()
@@ -381,6 +543,7 @@ func (d *Daemon) runTranscription(path string, generation uint64) {
 		d.fail(path, generation, protocol.ErrEmptySpeech, "no speech detected in the recording")
 		return
 	}
+	transcript := text // original speech text, kept for the socket snapshot
 	d.logMeta("transcribed", len(text))
 	if d.cfg.VerboseTranscripts {
 		d.log.Info("transcript", "text", text)
@@ -389,22 +552,54 @@ func (d *Daemon) runTranscription(path string, generation uint64) {
 		_ = os.Remove(path)
 		return
 	}
-	if d.cfg.Translation.Enabled {
+	// Reload translation config from disk so that settings changed in the TUI
+	// are picked up immediately without restarting the daemon. Fall back to the
+	// in-memory config if the file cannot be read (e.g. first run, disk error).
+	translationCfg := d.cfg.Translation
+	if _, err := os.Stat(d.paths.ConfigFile()); err == nil {
+		if freshCfg, err := config.Load(d.paths); err == nil {
+			translationCfg = freshCfg.Translation
+		}
+	}
+
+	// Translate only for explicit translate-toggle operations (or test
+	// translation). Plain toggles paste raw recognition even when the
+	// global translation.enabled flag is on — the flag gates whether
+	// translate-toggle is available at all.
+	if d.opTranslate && translationCfg.Enabled && !d.testSpeechOnly {
 		d.opMu.Lock()
 		if d.currentOperation(generation) {
 			d.setPhase(protocol.PhaseTranslating, "", "")
 		}
 		d.opMu.Unlock()
-		translated, err := translate.Translate(ctx, d.cfg.Translation, strings.TrimSpace(text))
+		translated, err := translate.Translate(ctx, translationCfg, strings.TrimSpace(text))
 		if err != nil {
-			d.fail(path, generation, protocol.ErrTranslationFailed, "translation failed: "+err.Error())
-			return
+			d.log.Warn("translation failed, keeping raw speech transcript", "error", err)
+			if !paste {
+				d.opMu.Lock()
+				if d.currentOperation(generation) {
+					d.setPhase(protocol.PhaseSucceeded, transcript, "translation failed: "+err.Error())
+					d.setTranscript(transcript)
+				}
+				d.opMu.Unlock()
+				return
+			}
+		} else {
+			text = translated
 		}
-		if !d.currentOperation(generation) {
-			_ = os.Remove(path)
-			return
+	}
+
+	if !paste {
+		// Test overlay: recognition only. Expose the transcript as the
+		// succeeded result; the paste pipeline is deliberately untouched.
+		d.opMu.Lock()
+		if d.currentOperation(generation) {
+			d.setPhase(protocol.PhaseSucceeded, text, "")
+			d.setTranscript(transcript)
 		}
-		text = translated
+		d.opMu.Unlock()
+		d.log.Info("test transcription ready — result exposed, nothing pasted")
+		return
 	}
 
 	d.opMu.Lock()
@@ -427,7 +622,8 @@ func (d *Daemon) runTranscription(path string, generation uint64) {
 	if result.Pasted {
 		d.opMu.Lock()
 		if d.currentOperation(generation) {
-			d.setPhase(protocol.PhaseSucceeded, truncate(text), "")
+			d.setPhase(protocol.PhaseSucceeded, text, "")
+			d.setTranscript(transcript)
 		}
 		d.log.Info("paste succeeded", "backend", result.Backend)
 		d.opMu.Unlock()
@@ -436,7 +632,8 @@ func (d *Daemon) runTranscription(path string, generation uint64) {
 	// Truthful fallback: the text is on the clipboard but was not injected.
 	d.opMu.Lock()
 	if d.currentOperation(generation) {
-		d.setPhase(protocol.PhaseFailed, truncate(text), result.Detail)
+		d.setPhase(protocol.PhaseFailed, text, result.Detail)
+		d.setTranscript(transcript)
 	}
 	d.opMu.Unlock()
 	d.log.Warn("paste did not reach the focused app", "detail", result.Detail)
@@ -460,6 +657,7 @@ func (d *Daemon) fail(path string, generation uint64, code, detail string) {
 	d.opMu.Lock()
 	if d.currentOperation(generation) {
 		d.setPhase(protocol.PhaseFailed, "", detail)
+		d.setTranscript("")
 	}
 	d.opMu.Unlock()
 	d.log.Warn("operation failed", "code", code, "detail", detail)
@@ -478,6 +676,15 @@ func (d *Daemon) setPhase(phase protocol.Phase, result, lastErr string) {
 		d.lastError = lastErr
 		d.lastAt = time.Now()
 	}
+}
+
+// setTranscript records the complete original transcript of the last
+// operation, before any translation. Callers must hold opMu, matching
+// setPhase, and clear it (setTranscript("")) when an operation fails.
+func (d *Daemon) setTranscript(transcript string) {
+	d.stateMu.Lock()
+	d.lastTranscript = transcript
+	d.stateMu.Unlock()
 }
 
 func (d *Daemon) currentOperation(generation uint64) bool {
@@ -566,6 +773,15 @@ func (d *Daemon) handle(conn net.Conn) {
 		d.respond(conn, true, "", nil, d.State())
 	case protocol.OpToggle:
 		message, perr := d.Toggle()
+		d.respond(conn, perr == nil, message, perr, d.State())
+	case protocol.OpTranslateToggle:
+		message, perr := d.TranslateToggle()
+		d.respond(conn, perr == nil, message, perr, d.State())
+	case protocol.OpTestToggle, protocol.OpTestSpeech:
+		message, perr := d.TestToggleSpeech()
+		d.respond(conn, perr == nil, message, perr, d.State())
+	case protocol.OpTestTranslation:
+		message, perr := d.TestToggleTranslation()
 		d.respond(conn, perr == nil, message, perr, d.State())
 	case protocol.OpCancel:
 		message, perr := d.Cancel()
@@ -670,14 +886,6 @@ func IsActive() bool { return Systemctl("is-active", "--quiet", UnitName) == nil
 func hasBinary(name string) bool {
 	_, err := exec.LookPath(name)
 	return err == nil
-}
-
-func truncate(text string) string {
-	const max = 60
-	if len(text) <= max {
-		return text
-	}
-	return text[:max] + "…"
 }
 
 func formatTime(t time.Time) string {

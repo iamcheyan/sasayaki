@@ -5,12 +5,16 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+
+	"github.com/mattn/go-isatty"
 
 	"github.com/iamcheyan/sasayaki/internal/config"
 	"github.com/iamcheyan/sasayaki/internal/diagnostics"
@@ -30,10 +34,29 @@ const (
 
 func main() {
 	paths := config.NewPaths()
-	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		// journald already stamps every line with a timestamp; drop slog's
+		// own so a line reads "level=INFO msg=…" instead of a duplicated
+		// time=… beside the journalctl prefix.
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return a
+		},
+	}))
 
 	args := os.Args[1:]
 	if len(args) == 0 {
+		if !isatty.IsTerminal(os.Stdin.Fd()) {
+			// Started from a GUI (desktop button, launcher, file manager)
+			// where stdin is not a TTY: open the TUI in a terminal
+			// emulator instead of failing. No desktop component is needed.
+			if err := launchInTerminal(os.Args[0]); err != nil {
+				fail(err)
+			}
+			return
+		}
 		if err := tui.Run(paths); err != nil {
 			fail(err)
 		}
@@ -49,6 +72,12 @@ func main() {
 		fail(runRepair(paths))
 	case "toggle":
 		fail(runToggle(paths))
+	case "translate-toggle":
+		fail(runTranslateToggle(paths))
+	case "cancel":
+		fail(runCancel(paths))
+	case "bindings":
+		runBindings(paths)
 	case "status":
 		code := runStatus(paths, hasJSONFlag(args[1:]))
 		os.Exit(code)
@@ -74,6 +103,69 @@ func main() {
 	}
 }
 
+// launchInTerminal re-executes the TUI inside a terminal emulator so the
+// control center opens when sasayaki is launched from a GUI, where stdin is
+// not a TTY. It tries $TERMINAL, xdg-terminal-exec, then common emulators.
+// This keeps the control center usable on any desktop without Sumika.
+func launchInTerminal(bin string) error {
+	if os.Getenv("WAYLAND_DISPLAY") == "" && os.Getenv("DISPLAY") == "" {
+		return errors.New("no display and no terminal; run sasayaki from a terminal")
+	}
+	if t := os.Getenv("TERMINAL"); t != "" {
+		if args, ok := terminalArgs(t, bin); ok {
+			return startDetached(t, args)
+		}
+	}
+	// UWSM app launch: gives the terminal a dedicated app-id that window
+	// managers match on (floating rules for the TUI). Generic Wayland tool,
+	// present on any uwsm session — not Sumika-specific.
+	if _, err := exec.LookPath("uwsm-app"); err == nil {
+		if x, err := exec.LookPath("xdg-terminal-exec"); err == nil {
+			if err := startDetached("setsid", []string{"uwsm-app", "--", x,
+				"--app-id=io.github.iamcheyan.sasayaki", "-e", bin}); err == nil {
+				return nil
+			}
+		}
+	}
+	if p, err := exec.LookPath("xdg-terminal-exec"); err == nil {
+		if err := startDetached(p, []string{"--app-id=io.github.iamcheyan.sasayaki", "-e", bin}); err == nil {
+			return nil
+		}
+	}
+	for _, t := range []string{"kitty", "foot", "alacritty", "ghostty", "wezterm", "konsole", "xterm"} {
+		if p, err := exec.LookPath(t); err == nil {
+			if args, ok := terminalArgs(t, bin); ok {
+				return startDetached(p, args)
+			}
+		}
+	}
+	return errors.New("no terminal emulator found; run sasayaki from a terminal")
+}
+
+// terminalArgs returns the argv that makes terminal t run bin, and whether t
+// is a terminal we know how to launch.
+func terminalArgs(t, bin string) ([]string, bool) {
+	switch t {
+	case "gnome-terminal":
+		return []string{"--", bin}, true
+	default:
+		// kitty, foot, alacritty, ghostty, wezterm, konsole, xterm,
+		// xfce4-terminal, x-terminal-emulator, … all take -e.
+		return []string{"-e", bin}, true
+	}
+}
+
+// startDetached launches bin and detaches: the emulator outlives this
+// short-lived launcher process.
+func startDetached(bin string, args []string) error {
+	cmd := exec.Command(bin, args...)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	cmd.Process.Release()
+	return nil
+}
+
 func runServe(paths config.Paths, log *slog.Logger) error {
 	daemon, err := service.New(paths, log)
 	if err != nil {
@@ -82,12 +174,20 @@ func runServe(paths config.Paths, log *slog.Logger) error {
 	return daemon.Run()
 }
 
-func runSetup(paths config.Paths) error {
+func resolveBinary() string {
 	binary, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("cannot locate the sasayaki binary: %w", err)
+	if err == nil && !strings.HasPrefix(binary, os.TempDir()) && !strings.Contains(binary, "/go-build") && !strings.Contains(binary, "/scratch") {
+		return binary
 	}
-	setup.SetBinary(binary)
+	if p, err := exec.LookPath("sasayaki"); err == nil {
+		return p
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "bin", "sasayaki")
+}
+
+func runSetup(paths config.Paths) error {
+	setup.SetBinary(resolveBinary())
 	setup.SetProgress(func(message string) { fmt.Println("  " + message) })
 	session := setup.NewSession(paths)
 	result := session.Run()
@@ -102,7 +202,7 @@ func runSetup(paths config.Paths) error {
 		}
 	}
 	if !result.AllOK() {
-		fmt.Fprintln(os.Stderr, "sasayaki: setup did not complete; fix the failing step and re-run `sasayaki setup`. No partial state was corrupted.")
+		fmt.Fprintln(os.Stderr, "sasayaki: setup did not complete; fix the failing step and re-run `sasayaki setup`.")
 		return fmt.Errorf("setup failed at step %s", strings.Join(result.Failed, ", "))
 	}
 	fmt.Println("Sasayaki is ready. Bind `sasayaki toggle` in your desktop settings.")
@@ -136,6 +236,59 @@ func runToggle(paths config.Paths) error {
 		return fmt.Errorf("%s", response.Error.Detail)
 	}
 	return nil
+}
+
+func runTranslateToggle(paths config.Paths) error {
+	response, err := service.Request(paths, "translate-toggle")
+	if err != nil {
+		return err
+	}
+	if response.Message != "" {
+		fmt.Println(response.Message)
+	}
+	if !response.OK && response.Error != nil {
+		return fmt.Errorf("%s", response.Error.Detail)
+	}
+	return nil
+}
+
+func runCancel(paths config.Paths) error {
+	response, err := service.Request(paths, "cancel")
+	if err != nil {
+		return err
+	}
+	if response.Message != "" {
+		fmt.Println(response.Message)
+	}
+	return nil
+}
+// runBindings prints the configured Hyprland keybindings in the
+// tab-delimited "kind<TAB>binding" format consumed by the Sumika Shell
+// Hyprland bindings generator. Voice bindings trigger sasayaki.toggle;
+// the translation binding triggers sasayaki.translate-toggle.
+func runBindings(paths config.Paths) {
+	cfg, err := config.Load(paths)
+	if err != nil {
+		// Fall back to defaults on config error so keybinds still work.
+		cfg = config.Default()
+	}
+	bindings := cfg.VoiceBindings
+	if len(bindings) == 0 {
+		bindings = config.DefaultVoiceBindings
+	}
+	for _, b := range bindings {
+		if strings.TrimSpace(b) == "" {
+			continue
+		}
+		fmt.Printf("voice\t%s\n", strings.TrimSpace(b))
+	}
+	tb := strings.TrimSpace(cfg.TranslationBinding)
+	if tb == "" {
+		tb = config.DefaultTranslationBinding
+	}
+	if tb != "" {
+		fmt.Printf("translation\t%s\n", tb)
+	}
 }
 
 func runStatus(paths config.Paths, asJSON bool) int {
@@ -358,6 +511,9 @@ Usage:
   sasayaki setup                Install/repair the selected local runtime, model and service
   sasayaki repair               Re-run checks and repair local components
   sasayaki toggle               Start or finish voice input (desktop shortcut)
+  sasayaki translate-toggle     Record and translate (requires translation enabled)
+  sasayaki cancel               Cancel active recording or transcription
+  sasayaki bindings             Print Hyprland keybindings for desktop integration
   sasayaki status [--json]      Show service and readiness state
   sasayaki diagnose [--json]    Full dependency and capability report
   sasayaki models [select|download ID]

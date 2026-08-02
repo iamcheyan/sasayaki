@@ -303,7 +303,7 @@ func TestDownloadChecksumMismatch(t *testing.T) {
 	defer server.Close()
 
 	downloadClient = &http.Client{}
-	err := downloadFile(server.URL, dest, strings.Repeat("a", 64))
+	err := downloadFile(server.URL, dest, strings.Repeat("a", 64), 0, nil)
 	if err == nil {
 		t.Fatal("downloadFile must reject a checksum mismatch")
 	}
@@ -338,7 +338,7 @@ func TestDownloadResume(t *testing.T) {
 	if err := os.WriteFile(dest+".part", body[:5], 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := downloadFile(server.URL, dest, want); err != nil {
+	if err := downloadFile(server.URL, dest, want, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	if !servedRange {
@@ -368,7 +368,7 @@ func TestDownloadRestartsWhenServerIgnoresRange(t *testing.T) {
 		t.Fatal(err)
 	}
 	downloadClient = &http.Client{}
-	if err := downloadFile(server.URL, dest, want); err != nil {
+	if err := downloadFile(server.URL, dest, want, 0, nil); err != nil {
 		t.Fatalf("ignored-range download should restart cleanly: %v", err)
 	}
 	got, err := os.ReadFile(dest + ".part")
@@ -385,7 +385,7 @@ func TestDownloadChecksumFailureDiscardsCorruptPart(t *testing.T) {
 	}))
 	defer server.Close()
 	downloadClient = &http.Client{}
-	if err := downloadFile(server.URL, dest, strings.Repeat("a", 64)); err == nil {
+	if err := downloadFile(server.URL, dest, strings.Repeat("a", 64), 0, nil); err == nil {
 		t.Fatal("checksum mismatch should fail")
 	}
 	if _, err := os.Stat(dest + ".part"); !os.IsNotExist(err) {
@@ -409,7 +409,7 @@ func TestDownloadRangeNotSatisfiableVerifies(t *testing.T) {
 		t.Fatal(err)
 	}
 	downloadClient = &http.Client{}
-	if err := downloadFile(server.URL, dest, want); err != nil {
+	if err := downloadFile(server.URL, dest, want, 0, nil); err != nil {
 		t.Fatalf("416 with complete .part should verify and succeed: %v", err)
 	}
 	if got, err := os.ReadFile(dest + ".part"); err != nil || string(got) != string(body) {

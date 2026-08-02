@@ -96,9 +96,34 @@ func TestLoadMissingFileReturnsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != Default() {
-		t.Fatalf("defaults mismatch: %+v", got)
+	if !configEqual(got, Default()) {
+		t.Fatalf("defaults mismatch: got=%+v want=%+v", got, Default())
 	}
+}
+
+func configEqual(a, b Config) bool {
+	if a.SpeechModel != b.SpeechModel || a.Language != b.Language ||
+		a.ShortcutMode != b.ShortcutMode || a.Retention != b.Retention ||
+		a.KeepRecordings != b.KeepRecordings || a.VerboseTranscripts != b.VerboseTranscripts ||
+		a.TranslationBinding != b.TranslationBinding {
+		return false
+	}
+	if !sliceEq(a.VoiceBindings, b.VoiceBindings) {
+		return false
+	}
+	return a.Translation == b.Translation
+}
+
+func sliceEq(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestLoadInvalidFileIsError(t *testing.T) {
