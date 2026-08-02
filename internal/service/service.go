@@ -327,9 +327,9 @@ func sampleMicLevel(rawPath string) int {
 	if step < 1 {
 		step = 1
 	}
-	var peak int16
+	var peak int32
 	for i := 0; i < n; i += step {
-		v := int16(binary.LittleEndian.Uint16(raw[i*2:]))
+		v := int32(int16(binary.LittleEndian.Uint16(raw[i*2:])))
 		if v < 0 {
 			v = -v
 		}

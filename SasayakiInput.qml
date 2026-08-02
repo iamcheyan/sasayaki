@@ -37,10 +37,6 @@ Singleton {
     property bool translationReady: false
     property string translationTargetLanguage: ""
 
-    // ── History ──
-    property list<var> history: []
-    readonly property int maxHistory: 20
-
     // ── Recording ──
     property real recordingDuration: 0
     readonly property real maxRecordingDuration: 90.0
@@ -268,23 +264,5 @@ Singleton {
     // ── Open settings panel ──
     function openSettings() {
         GlobalStates.barPopupType = "sasayaki"
-    }
-
-    // ── History ──
-    function addToHistory(text) {
-        if (!text || text.length === 0) return
-        var now = new Date()
-        var timeStr = now.getHours().toString().padStart(2, '0') + ":" +
-                      now.getMinutes().toString().padStart(2, '0')
-        var entry = { text: text, time: timeStr }
-        var newHistory = [entry].concat(root.history)
-        if (newHistory.length > root.maxHistory) {
-            newHistory = newHistory.slice(0, root.maxHistory)
-        }
-        root.history = newHistory
-    }
-
-    function clearHistory() {
-        root.history = []
     }
 }

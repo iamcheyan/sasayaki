@@ -6,9 +6,11 @@ package paste
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"time"
 )
 
 // Result reports exactly what a Paste call achieved.
@@ -34,10 +36,14 @@ type execRunner struct{}
 
 func (execRunner) LookPath(name string) (string, error) { return exec.LookPath(name) }
 func (execRunner) Run(name string, args ...string) ([]byte, error) {
-	return exec.Command(name, args...).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	return exec.CommandContext(ctx, name, args...).CombinedOutput()
 }
 func (execRunner) RunStdin(name string, args []string, stdin []byte) ([]byte, error) {
-	cmd := exec.Command(name, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdin = bytes.NewReader(stdin)
 	// Clipboard tools (wl-copy, xclip, xsel) fork a background daemon that
 	// holds the selection. CombinedOutput would block on EOF of the stdout
@@ -119,9 +125,9 @@ func copyToClipboard(r runner, text string) (string, error) {
 		}
 		if _, err := r.RunStdin(tool, args, []byte(text)); err == nil {
 			return tool, nil
-		} else {
-			return "", fmt.Errorf("%s: %v", tool, err)
 		}
+		// Fall through to the next tool: a present-but-failing wl-copy
+		// should not prevent xclip/xsel from being tried.
 	}
 	return "", fmt.Errorf("no clipboard tool found")
 }

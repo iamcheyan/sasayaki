@@ -4,11 +4,13 @@
 package diagnostics
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/iamcheyan/sasayaki/internal/config"
 	"github.com/iamcheyan/sasayaki/internal/transcribe"
@@ -24,7 +26,9 @@ type execRunner struct{}
 
 func (execRunner) LookPath(name string) (string, error) { return exec.LookPath(name) }
 func (execRunner) Run(name string, args ...string) ([]byte, error) {
-	return exec.Command(name, args...).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return exec.CommandContext(ctx, name, args...).CombinedOutput()
 }
 
 // DefaultRunner executes real commands.
@@ -59,18 +63,22 @@ func AllWith(r Runner, p config.Paths) Report {
 	if err != nil {
 		cfg = config.Default()
 	}
+	// Verify the model manifest once and reuse the result for both the
+	// speech-model check and report.Model. Hashing ~230MB of ONNX twice
+	// per diagnose call wastes ~1s of CPU and a full disk read.
+	modelProblems := transcribe.VerifyModelFor(p, cfg.SpeechModel)
 	report.Checks = append(report.Checks,
 		toolCheck(r, "python3", "Python 3 interpreter", "Install python3 (e.g. dnf install python3 / apt install python3)"),
 		toolCheck(r, "parecord", "Microphone recorder (PulseAudio/PipeWire)", "Install pulseaudio-utils (dnf/apt/pacman)"),
 	)
 	report.Checks = append(report.Checks, systemdCheck(r))
 	report.Checks = append(report.Checks, runtimeCheck(p))
-	report.Checks = append(report.Checks, modelCheck(p, cfg.SpeechModel))
+	report.Checks = append(report.Checks, modelCheckFrom(p, cfg.SpeechModel, modelProblems))
 	report.Checks = append(report.Checks, micCheck(r))
 	report.Checks = append(report.Checks, clipboardCheck(r))
 	report.Checks = append(report.Checks, pasteBackendCheck(r))
 	report.Checks = append(report.Checks, socketCheck(p))
-	report.Model = transcribe.VerifyModelFor(p, cfg.SpeechModel)
+	report.Model = modelProblems
 	return report
 }
 
@@ -113,9 +121,8 @@ func runtimeCheck(p config.Paths) Check {
 	}
 }
 
-func modelCheck(p config.Paths, id string) Check {
+func modelCheckFrom(p config.Paths, id string, problems []string) Check {
 	model, known := transcribe.SpeechModelByID(id)
-	problems := transcribe.VerifyModelFor(p, id)
 	if len(problems) == 0 {
 		return Check{Name: "speech model", OK: true, Detail: model.Label + " verified (" + model.Architecture + ")"}
 	}

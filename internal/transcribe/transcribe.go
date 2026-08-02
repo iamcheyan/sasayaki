@@ -28,7 +28,6 @@ const (
 
 const (
 	startTimeout   = 120 * time.Second // cold model load
-	requestTimeout = 5 * time.Minute
 	initialBackoff = 500 * time.Millisecond
 	maxBackoff     = 30 * time.Second
 )
@@ -74,13 +73,25 @@ func NewWorker(paths config.Paths, language, modelID string) *Worker {
 // start times out. A missing runtime/model yields a descriptive error; the
 // worker keeps its dead state so Status() stays truthful.
 func (w *Worker) Start(ctx context.Context) error {
+	return w.start(ctx, true)
+}
+
+// start spawns (or re-spawns) the engine process under w.mu, so concurrent
+// callers (EnsureWarm racing the restart loop, or two toggles) never spawn a
+// second engine.py — the loser would leak ~1GB of resident model. A starting
+// or warm worker is a no-op. The lock is held across cmd.Start so Shutdown
+// cannot race a half-spawned process into existence.
+func (w *Worker) start(ctx context.Context, recordBackoff bool) error {
 	w.mu.Lock()
-	stopping := w.stoppingLocked()
-	w.mu.Unlock()
-	if stopping {
+	defer w.mu.Unlock()
+	if w.stoppingLocked() {
 		return errors.New("worker is shutting down")
 	}
-	return w.startLocked(ctx, true)
+	// Single-flight: a starting or warm worker already owns a process.
+	if w.state == WorkerStarting || w.state == WorkerWarm {
+		return nil
+	}
+	return w.startLocked(ctx, recordBackoff)
 }
 
 // EnsureWarm blocks until the worker is warm or ctx expires, starting the
@@ -182,7 +193,10 @@ func (w *Worker) Shutdown() {
 }
 
 // startLocked spawns the process and waits for its ready line. On failure
-// the worker transitions to dead with the error recorded.
+// the worker transitions to dead with the error recorded. Caller MUST hold
+// w.mu and MUST have checked stoppingLocked + single-flight (state not
+// Starting/Warm). The lock is released while blocked on the ready line so
+// Transcribe/Status can run, then reacquired to record the outcome.
 func (w *Worker) startLocked(ctx context.Context, recordBackoff bool) error {
 	selected, ok := SpeechModelByID(w.modelID)
 	if !ok {
@@ -202,60 +216,67 @@ func (w *Worker) startLocked(ctx context.Context, recordBackoff bool) error {
 	stderr := &boundedBuffer{limit: 4 << 10}
 	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
-		w.mu.Lock()
 		w.state = WorkerDead
 		w.lastErr = fmt.Sprintf("starting engine: %v", err)
-		w.mu.Unlock()
 		return fmt.Errorf("starting model engine: %w", err)
 	}
 
-	w.mu.Lock()
 	w.proc = cmd
 	w.stdin = stdin
 	w.state = WorkerStarting
-	w.mu.Unlock()
-
 	ready := make(chan error, 1)
+	w.wg.Add(1)
 	go w.readLoop(stdout, ready)
+
+	// Release the lock while blocked on the ready line so Transcribe/Status
+	// can run, then reacquire it to record the outcome.
+	w.mu.Unlock()
+	var readyErr error
 	select {
-	case err := <-ready:
-		if err != nil {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-			detail := err.Error()
-			if extra := strings.TrimSpace(stderr.String()); extra != "" {
-				detail += " (" + extra + ")"
-			}
-			w.mu.Lock()
-			w.state = WorkerDead
-			w.lastErr = detail
-			w.mu.Unlock()
-			return fmt.Errorf("%s", detail)
-		}
-		w.mu.Lock()
-		w.state = WorkerWarm
-		w.lastErr = ""
-		if recordBackoff {
-			w.backoff = initialBackoff
-		}
-		w.mu.Unlock()
-		return nil
+	case readyErr = <-ready:
 	case <-ctx.Done():
+		readyErr = ctx.Err()
+	}
+	w.mu.Lock()
+
+	// Shutdown may have closed stopCh while we were unlocked. If so, kill
+	// the process we just spawned and leave the worker dead — never let a
+	// start win against a shutdown.
+	if w.stoppingLocked() {
+		w.mu.Unlock()
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		w.mu.Lock()
-		w.state = WorkerDead
-		w.lastErr = "engine did not become ready in time"
-		w.mu.Unlock()
-		return ctx.Err()
+		w.wg.Wait()
+		return errors.New("worker is shutting down")
 	}
+
+	if readyErr != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		w.wg.Wait()
+		detail := readyErr.Error()
+		if readyErr == ctx.Err() {
+			detail = "engine did not become ready in time"
+		}
+		if extra := strings.TrimSpace(stderr.String()); extra != "" {
+			detail += " (" + extra + ")"
+		}
+		w.state = WorkerDead
+		w.lastErr = detail
+		return fmt.Errorf("%s", detail)
+	}
+	w.state = WorkerWarm
+	w.lastErr = ""
+	if recordBackoff {
+		w.backoff = initialBackoff
+	}
+	return nil
 }
 
 // readLoop consumes engine stdout. The first line is the ready marker; later
 // lines are routed to pending request channels. When the process exits
 // (EOF/read error) all pending requests fail and a restart is scheduled.
 func (w *Worker) readLoop(out io.Reader, ready chan<- error) {
-	w.wg.Add(1)
 	defer w.wg.Done()
 	scanner := bufio.NewScanner(out)
 	scanner.Buffer(make([]byte, 0, 64<<10), 4<<20)
@@ -327,30 +348,42 @@ func (w *Worker) readLoop(out io.Reader, ready chan<- error) {
 }
 
 // scheduleRestart respawns the engine after a capped backoff unless the
-// worker is shutting down.
+// worker is shutting down. It loops rather than recurses so a persistently
+// dead model cannot grow the call stack over time.
 func (w *Worker) scheduleRestart() {
-	w.mu.Lock()
-	if w.backoff == 0 {
-		w.backoff = initialBackoff
-	}
-	delay := w.backoff
-	if w.backoff < maxBackoff {
-		w.backoff *= 2
-	}
-	w.mu.Unlock()
+	for {
+		w.mu.Lock()
+		if w.backoff == 0 {
+			w.backoff = initialBackoff
+		}
+		delay := w.backoff
+		if w.backoff < maxBackoff {
+			w.backoff *= 2
+		}
+		stopping := w.stoppingLocked()
+		w.mu.Unlock()
+		if stopping {
+			return
+		}
 
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-	case <-w.stopCh:
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), startTimeout)
-	defer cancel()
-	if err := w.startLocked(ctx, false); err != nil {
-		// Keep retrying with backoff; the state is already dead.
-		w.scheduleRestart()
+		timer := time.NewTimer(delay)
+		select {
+		case <-timer.C:
+		case <-w.stopCh:
+			timer.Stop()
+			return
+		}
+		timer.Stop()
+
+		// Re-check shutdown after the sleep; a Shutdown during the wait
+		// would otherwise spawn a process into a dead worker.
+		ctx, cancel := context.WithTimeout(context.Background(), startTimeout)
+		if err := w.start(ctx, false); err != nil {
+			cancel()
+			continue // keep retrying with backoff; state is already dead
+		}
+		cancel()
+		return // warm — restart loop exits, readLoop owns the next death
 	}
 }
 
