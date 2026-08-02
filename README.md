@@ -20,9 +20,14 @@ integration is an add-on; the program works identically without it.
   control center.
 - **Toggle-to-record** — press the hotkey once to start recording, again to
   transcribe and paste into the focused window. Press `Escape` to cancel.
-- **Automatic paste** — copies the result to the clipboard and injects the
-  paste chord (wtype → ydotool → xdotool, whichever is available) into the
-  focused application on both Wayland and X11.
+- **Automatic paste** — copies the result to the clipboard and pastes it
+  into the focused window on both Wayland and X11. The paste is
+  window-aware: it resolves the focused window (via `hyprctl` on Hyprland),
+  uses kitty's native remote paste in kitty, sends the chord the app
+  actually binds (`Ctrl+V` for GUI apps, `Shift+Insert`/`Ctrl+Shift+V` for
+  terminals), and reaches XWayland windows through the X11 clipboard
+  (`xsel`) plus `xdotool`. Backends fall back in order: `wtype` →
+  `ydotool` → `hyprctl send_key_state` → `xdotool`.
 - **Optional online translation** — after transcription, send the text to any
   OpenAI-compatible endpoint and paste the translated result. Bound to a
   dedicated hotkey; a plain `toggle` never translates.
@@ -42,7 +47,7 @@ integration is an add-on; the program works identically without it.
 - Linux with PipeWire/PulseAudio recording support (`parecord`)
 - Python 3, used privately for the local `sherpa-onnx` inference runtime
 - `wl-copy` and a paste backend (`wtype` is preferred on Wayland; `ydotool`
-  or `xdotool` also work)
+  or `xdotool` also work); `xsel` extends pasting to XWayland programs
 - systemd user services (for the background recorder/transcriber)
 
 First-run setup installs Python packages in Sasayaki's own data directory and

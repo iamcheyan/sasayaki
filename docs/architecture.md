@@ -11,7 +11,7 @@ short-lived Go CLI ── Unix socket ── Go user service
                                           │
                               parecord ──┤── private Python/SenseVoice
                                           │
-                                          └── wl-copy + wtype → focused app
+                                          └── wl-copy → window-aware paste → focused app
 ```
 
 ## Why Go plus Python
@@ -60,7 +60,7 @@ claim a paste that only reached the clipboard.
 ```text
 parecord (16 kHz mono s16le raw) ──▶ Go WAV wrapper
         ──▶ warm worker ──▶ venv sherpa-onnx SenseVoice (use_itn, 4 threads)
-        ──▶ normalized text ──▶ wl-copy ──▶ wtype/ydotool/xdotool paste
+        ──▶ normalized text ──▶ wl-copy ──▶ window-aware paste (wtype/ydotool/xdotool)
 ```
 
 A worker process is kept warm in the service (model resident in memory,
@@ -84,10 +84,26 @@ systemctl --user daemon-reload
 Wayland prevents arbitrary programs from globally listening for key presses or
 injecting text. Sasayaki therefore asks the desktop/compositor to own the
 global shortcut and provides a portable command target: `sasayaki toggle`.
-For paste, it uses `wl-copy` and `wtype`. This is visible in status rather than
-silently pretending it can work everywhere. X11 and portal-specific backends
-can be added behind the paste/shortcut interfaces without changing the service
-protocol.
+For paste, `internal/paste` resolves the focused window and picks the path
+that actually works for it, rather than silently pretending one chord works
+everywhere:
+
+- **Native Wayland** — the text goes to the Wayland clipboard (`wl-copy`),
+  then the paste chord the app binds is injected: kitty gets its native
+  remote paste (`kitty @ action paste_from_clipboard`), GUI apps get
+  `Ctrl+V`, terminals get `Shift+Insert` / `Ctrl+Shift+V`. Key injection
+  falls back `wtype` → `ydotool` → `hyprctl send_key_state` → `xdotool`.
+- **XWayland windows** (Hyprland: `hyprctl activewindow` reports
+  `xwayland: true`) — the text is written to the X11 clipboard (`xsel`,
+  `xclip` fallback) and the chord is injected at the X server with
+  `xdotool` XTEST, which reaches the focused X window where Wayland virtual
+  keyboards cannot.
+- **No usable backend** — the clipboard is still set and the result is
+  reported as clipboard-only (never as pasted); `sasayaki diagnose` names
+  the missing tool.
+
+Backends live behind the `internal/paste` interface, so the service protocol
+does not change when one is added or removed.
 
 The default is toggle-to-record, which is reliable for generic command
 shortcuts. A portal push-to-talk binding is a future enhancement where
