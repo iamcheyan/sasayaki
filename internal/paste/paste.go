@@ -229,6 +229,26 @@ func ensureGraphicalEnvironment() {
 			}
 		}
 	}
+
+	// Hyprland's hyprctl needs HYPRLAND_INSTANCE_SIGNATURE to locate its
+	// IPC socket. A user service started outside the Hyprland session
+	// never inherits it, so hyprctl -j activewindow fails and paste falls
+	// back to the X11 path (which marks every window XWayland and breaks
+	// native Wayland paste). Probe the hypr/ runtime dir for the live
+	// instance directory; hyprctl instances is a fallback.
+	if os.Getenv("HYPRLAND_INSTANCE_SIGNATURE") == "" {
+		entries, _ := os.ReadDir(filepath.Join(runtimeDir, "hypr"))
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			if strings.Contains(name, "_") && socketExists(filepath.Join(runtimeDir, "hypr", name, ".socket.sock")) {
+				_ = os.Setenv("HYPRLAND_INSTANCE_SIGNATURE", name)
+				break
+			}
+		}
+	}
 }
 
 func socketExists(path string) bool {
