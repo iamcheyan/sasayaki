@@ -14,12 +14,12 @@ import (
 
 // Defaults for configurable behavior.
 const (
-	DefaultLanguage        = "auto"
-	DefaultSpeechModel     = "sensevoice-int8"
-	DefaultShortcutMode    = "toggle"
-	DefaultRetention       = 10 * time.Minute
-	MinRecording           = 300 * time.Millisecond
-	DefaultVoiceBinding    = "ALT + A"
+	DefaultLanguage           = "auto"
+	DefaultSpeechModel        = "sensevoice-int8"
+	DefaultShortcutMode       = "toggle"
+	DefaultRetention          = 10 * time.Minute
+	MinRecording              = 300 * time.Millisecond
+	DefaultVoiceBinding       = "ALT + A"
 	DefaultTranslationBinding = "HANGUL"
 )
 
