@@ -83,14 +83,9 @@ PageBody {
                 }
             }
             SettingsButton {
-                label: SasayakiInput.state === "setup" ? "Run Setup" : "Run Repair"
+                label: "Repair Everything"
                 iconName: "build"
-                onClicked: {
-                    if (SasayakiInput.state === "setup")
-                        Quickshell.execDetached(["sasayaki", "setup"]);
-                    else
-                        Quickshell.execDetached(["sasayaki", "repair"]);
-                }
+                onClicked: SasayakiInput.repair()
             }
             SettingsButton {
                 label: "Restart Service"

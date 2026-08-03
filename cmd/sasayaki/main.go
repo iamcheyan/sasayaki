@@ -214,13 +214,41 @@ func runRepair(paths config.Paths) error {
 	if err := runSetup(paths); err != nil {
 		return err
 	}
+	if err := repairDesktopIntegration(); err != nil {
+		return err
+	}
 	report := diagnostics.All(paths)
 	for _, check := range report.Checks {
 		if !check.OK {
 			return fmt.Errorf("repair completed but %s still needs attention: %s", check.Name, check.Detail)
 		}
 	}
-	fmt.Println("Local runtime, model, service and desktop tools are ready.")
+	fmt.Println("Local runtime, model, service, desktop bindings and Sumika integration are ready.")
+	return nil
+}
+
+// repairDesktopIntegration reapplies the desktop pieces that live outside
+// Sasayaki's private paths. It is best-effort across desktops: Hyprland and
+// Sumika are refreshed when present, while standalone installations simply
+// skip those integration steps.
+func repairDesktopIntegration() error {
+	if hyprctl, err := exec.LookPath("hyprctl"); err == nil {
+		if output, err := exec.Command(hyprctl, "reload").CombinedOutput(); err != nil {
+			return fmt.Errorf("could not reload Hyprland bindings: %w: %s", err, strings.TrimSpace(string(output)))
+		}
+		fmt.Println("  [ok ] Reloaded Hyprland bindings")
+	} else {
+		fmt.Println("  [-- ] Hyprland not found; skipped desktop binding reload")
+	}
+
+	if restart, err := exec.LookPath("sumika-restart"); err == nil {
+		if output, err := exec.Command(restart, "--quickshell-only").CombinedOutput(); err != nil {
+			return fmt.Errorf("could not restart Quickshell: %w: %s", err, strings.TrimSpace(string(output)))
+		}
+		fmt.Println("  [ok ] Restarted Quickshell integration")
+	} else {
+		fmt.Println("  [-- ] Sumika Shell not found; skipped Quickshell restart")
+	}
 	return nil
 }
 
@@ -262,6 +290,7 @@ func runCancel(paths config.Paths) error {
 	}
 	return nil
 }
+
 // runBindings prints the configured Hyprland keybindings in the
 // tab-delimited "kind<TAB>binding" format consumed by the Sumika Shell
 // Hyprland bindings generator. Voice bindings trigger sasayaki.toggle;

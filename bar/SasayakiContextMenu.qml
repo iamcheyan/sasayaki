@@ -1,6 +1,7 @@
 pragma ComponentBehavior: Bound
 import qs
 import qs.modules.common
+import qs.modules.sasayaki
 import qs.modules.common.widgets
 import QtQuick
 import Quickshell
@@ -15,6 +16,15 @@ ContextMenuWindow {
             // Plain `sasayaki` opens the TUI in a terminal emulator on its
             // own, so this works on any desktop, not just Sumika.
             Quickshell.execDetached(["sasayaki"]);
+            root.close();
+        }
+    }
+
+    ContextMenuItem {
+        nerdIcon: NerdIconMap.wrench
+        labelText: "Repair Everything"
+        onClicked: {
+            SasayakiInput.repair();
             root.close();
         }
     }

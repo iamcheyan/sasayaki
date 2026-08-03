@@ -34,6 +34,9 @@ After=graphical-session.target
 
 [Service]
 Type=simple
+# systemd user services may not inherit the desktop shell PATH. Keep the
+# external audio, clipboard, and input tools discoverable for the daemon.
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
 ExecStart=%s serve
 Restart=on-failure
 RestartSec=2

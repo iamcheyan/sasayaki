@@ -24,5 +24,10 @@ Item {
             type: "qml",
             call: function(p) { SasayakiInput.toggleTranslation() }
         }, {description: "Record speech, translate it online, and paste the result"})
+
+        ActionManager.register("sasayaki.repair", "sasayaki", "Repair Sasayaki", {
+            type: "qml",
+            call: function(p) { SasayakiInput.repair() }
+        }, {description: "Repair runtime, model, service and desktop integration"})
     }
 }

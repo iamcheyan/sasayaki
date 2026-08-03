@@ -20,14 +20,20 @@ Item {
     readonly property bool isTranslating: voiceState === "translating"
     readonly property bool isSetup: voiceState === "setup"
     readonly property bool isError: voiceState === "error"
+    // Recognition succeeded when only the final clipboard/paste step failed;
+    // show that as a warning rather than a microphone/engine error.
+    readonly property bool isPasteError: root.isError
+        && SasayakiInput.lastError.indexOf("Clipboard") >= 0
     readonly property bool isActive: isRecording || isTranscribing || isTranslating || isSetup
 
     readonly property color colorIdle: Appearance.colors.colBarText
     readonly property color colorRecording: "#F5C542"
     readonly property color colorTranscribing: "#5B9BD5"
     readonly property color colorError: "#FF3B30"
+    readonly property color colorWarning: "#F5C542"
 
     readonly property color iconColor: {
+        if (root.isPasteError) return root.colorWarning
         if (root.isError) return root.colorError
         if (root.isRecording) return root.colorRecording
         if (root.isTranscribing || root.isTranslating) return root.colorTranscribing

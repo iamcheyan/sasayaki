@@ -143,6 +143,7 @@ var (
 func Paste(text string) Result { return PasteWith(execRunner{}, text) }
 
 func PasteWith(r runner, text string) Result {
+	ensureGraphicalEnvironment()
 	payload := []byte(text)
 	if _, copyErr := copyToClipboard(r, payload); copyErr != nil {
 		return Result{Detail: "Clipboard unavailable: " + copyErr.Error() + ". Install wl-clipboard (wl-copy), xclip, or xsel."}
@@ -185,6 +186,60 @@ func PasteWith(r runner, text string) Result {
 		Backend: "clipboard",
 		Detail:  "Copied to clipboard; paste it manually (install wtype, ydotool or xdotool for automatic paste).",
 	}
+}
+
+// ensureGraphicalEnvironment repairs the environment of a user service that
+// started before the graphical session imported its display variables.
+// systemd may launch sasayaki with XDG_RUNTIME_DIR but without
+// WAYLAND_DISPLAY/DISPLAY; clipboard and input tools then fail even though
+// the sockets are available.
+func ensureGraphicalEnvironment() {
+	runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
+	if runtimeDir == "" {
+		runtimeDir = fmt.Sprintf("/run/user/%d", os.Getuid())
+	}
+
+	wayland := os.Getenv("WAYLAND_DISPLAY")
+	if wayland == "" || !socketExists(filepath.Join(runtimeDir, wayland)) {
+		matches, _ := filepath.Glob(filepath.Join(runtimeDir, "wayland-*"))
+		for _, path := range matches {
+			if socketExists(path) {
+				wayland = filepath.Base(path)
+				break
+			}
+		}
+	}
+	if wayland != "" {
+		_ = os.Setenv("WAYLAND_DISPLAY", wayland)
+	}
+
+	if os.Getenv("DISPLAY") == "" {
+		matches, _ := filepath.Glob("/tmp/.X11-unix/X*")
+		for _, path := range matches {
+			if !socketExists(path) {
+				continue
+			}
+			display := strings.TrimPrefix(filepath.Base(path), "X")
+			if display != "" && allDigits(display) {
+				_ = os.Setenv("DISPLAY", ":"+display)
+				break
+			}
+		}
+	}
+}
+
+func socketExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode()&os.ModeSocket != 0
+}
+
+func allDigits(value string) bool {
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return value != ""
 }
 
 func pasted(transport string) Result {

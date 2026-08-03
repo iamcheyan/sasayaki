@@ -25,9 +25,9 @@ Singleton {
     property string language: ""
     property string translation: ""
     property int micLevel: 0
-    property int modelSizeMB: 0
     property bool daemonRunning: false
     property bool workerWarm: false
+    property bool repairing: false
 
     // ── Last result ──
     property string lastTranscription: ""
@@ -61,7 +61,7 @@ Singleton {
     readonly property bool isTranslating: state === "translating"
     readonly property bool isSetup: state === "setup"
     readonly property bool isError: state === "error"
-    readonly property bool isActive: isRecording || isTranscribing || isTranslating || isSetup
+    readonly property bool isActive: isRecording || isTranscribing || isTranslating || isSetup || repairing
 
     Component.onCompleted: {
         if (ModuleLoader.isEnabled("sasayaki")) {
@@ -224,6 +224,32 @@ Singleton {
             root.state = "recording"
         }
         Quickshell.execDetached([root.binary, "translate-toggle"])
+    }
+
+    // ── Repair ──
+    function repair() {
+        if (repairProc.running) return
+        root.repairing = true
+        root.state = "setup"
+        root.notify("🔧 Repairing Sasayaki", "Checking runtime, model, service and desktop integration…")
+        repairProc.running = true
+    }
+
+    Process {
+        id: repairProc
+        command: [root.binary, "repair"]
+        running: false
+        onExited: (code, status) => {
+            root.repairing = false
+            if (code === 0) {
+                root.notify("✅ Sasayaki repaired", "Runtime, model, service and desktop integration are ready")
+                root.refresh()
+            } else {
+                root.lastError = "Repair failed (code " + code + ")"
+                root.state = "error"
+                root.notify("❌ Sasayaki repair failed", "Run `sasayaki diagnose` for details")
+            }
+        }
     }
 
     // ── Setup ──

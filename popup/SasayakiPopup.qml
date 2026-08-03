@@ -24,6 +24,7 @@ PopupColumn {
     }
     function tone() {
         if (SasayakiInput.state === "idle" || SasayakiInput.state === "success") return TuiStyle.success
+        if (SasayakiInput.state === "error" && SasayakiInput.lastError.indexOf("Clipboard") >= 0) return TuiStyle.warning
         if (SasayakiInput.state === "recording" || SasayakiInput.state === "error") return TuiStyle.danger
         if (SasayakiInput.state === "transcribing" || SasayakiInput.state === "translating" || SasayakiInput.state === "setup") return TuiStyle.warning
         return TuiStyle.muted
@@ -179,7 +180,16 @@ PopupColumn {
                     enabledState: SasayakiInput.lastTranscription.length > 0
                     onClicked: {
                         Quickshell.execDetached(["bash", "-c",
-                            `printf '%s' '${StringUtils.shellSingleQuoteEscape(SasayakiInput.lastTranscription)}' | wl-copy`]);
+                            `text='${StringUtils.shellSingleQuoteEscape(SasayakiInput.lastTranscription)}';
+                            if command -v wl-copy >/dev/null 2>&1; then
+                                printf '%s' "$text" | wl-copy --trim-newline;
+                            elif command -v xclip >/dev/null 2>&1; then
+                                printf '%s' "$text" | xclip -selection clipboard -i;
+                            elif command -v xsel >/dev/null 2>&1; then
+                                printf '%s' "$text" | xsel --clipboard --input;
+                            else
+                                exit 1;
+                            fi`]);
                         SasayakiInput.notify("Copied", SasayakiInput.lastTranscription, "edit-copy");
                     }
                 }
