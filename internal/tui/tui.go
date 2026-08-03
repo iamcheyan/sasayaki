@@ -76,6 +76,7 @@ type setupProgressMsg struct{ line string }
 type setupDoneMsg struct {
 	result setup.PlanResult
 	err    error
+	repair bool // true when triggered by the repair key (r/R)
 }
 
 type logsMsg struct{ lines []string }
@@ -139,14 +140,14 @@ type Model struct {
 	trialStopLogged      bool // stop block emitted for this session
 	trialTranslateLogged bool // "Translating with the LLM API" line emitted
 
-	logs      []string
-	logScroll int
-	diag      diagnostics.Report
-	diagDone  bool
-
-	setupLines []string
-	setupCh    <-chan tea.Msg
-	setupBusy  bool
+	logs        []string
+	logScroll   int
+	diag        diagnostics.Report
+	diagDone    bool
+	setupLines  []string
+	setupCh     <-chan tea.Msg
+	setupBusy   bool
+	setupRepair bool // true when the current overlay is a repair, not plain setup
 }
 
 // New builds the TUI model.
@@ -291,6 +292,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case setupDoneMsg:
 		m.setupBusy = false
 		m.setupCh = nil
+		isRepair := m.setupRepair
+		m.setupRepair = false
 		for _, s := range msg.result.Steps {
 			if s.Status == setup.StepFailed && s.Error != "" {
 				m.setupLines = append(m.setupLines, "Error ("+s.ID+"): "+s.Error)
@@ -298,9 +301,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.setupLines = append(m.setupLines, summaryLine(msg))
 		if msg.err != nil {
-			m.setupLines = append(m.setupLines, "setup failed: "+msg.err.Error())
+			label := "setup"
+			if isRepair || msg.repair {
+				label = "repair"
+			}
+			m.setupLines = append(m.setupLines, label+" failed: "+msg.err.Error())
 		}
-		m.showNotice("setup " + outcomeWord(msg))
+		label := "setup"
+		if isRepair || msg.repair {
+			label = "repair"
+		}
+		m.showNotice(label + " " + outcomeWord(msg))
 		// Setup may have downloaded/repaired model files: recompute the
 		// installed snapshot and reload config off the render loop.
 		return m, tea.Batch(loadConfigCmd(m.paths), refreshInstalledCmd(m.paths))
@@ -529,8 +540,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "q", "Q", "ctrl+c":
 		return m, tea.Quit
 	case "r", "R":
-		m.showNotice("Restarting service…")
-		return m, restartServiceCmd()
+		m.showNotice("Repairing…")
+		return m.startRepair()
 	case "t":
 		m.logScroll = 0
 		m.overlay = overlayTestSpeech
@@ -863,9 +874,27 @@ func (m Model) startSetup() (tea.Model, tea.Cmd) {
 	}
 	m.overlay = overlaySetup
 	m.setupBusy = true
+	m.setupRepair = false
 	m.setupLines = nil
 	ch := make(chan tea.Msg, 128)
 	go runSetupGoroutine(m.paths, ch)
+	m.setupCh = ch
+	return m, func() tea.Msg { return <-ch }
+}
+
+// startRepair opens the setup overlay (titled "Repair") and runs the full
+// repair goroutine: setup + desktop integration + diagnostics verification.
+func (m Model) startRepair() (tea.Model, tea.Cmd) {
+	if m.setupBusy {
+		m.showNotice("Repair is already running")
+		return m, nil
+	}
+	m.overlay = overlaySetup
+	m.setupBusy = true
+	m.setupRepair = true
+	m.setupLines = nil
+	ch := make(chan tea.Msg, 128)
+	go runRepairGoroutine(m.paths, ch)
 	m.setupCh = ch
 	return m, func() tea.Msg { return <-ch }
 }
@@ -1308,4 +1337,47 @@ func runSetupGoroutine(paths config.Paths, msgs chan<- tea.Msg) {
 	session := setup.NewSession(paths)
 	result := session.Run()
 	msgs <- setupDoneMsg{result: result}
+}
+
+// runRepairGoroutine runs the full repair flow off the update loop: setup
+// (runtime/model/service/config), then desktop integration (Hyprland binding
+// reload + Quickshell restart), then diagnostics verification. Progress lines
+// stream into msgs just like setup.
+func runRepairGoroutine(paths config.Paths, msgs chan<- tea.Msg) {
+	defer close(msgs)
+	binary, err := os.Executable()
+	if err != nil {
+		msgs <- setupDoneMsg{err: fmt.Errorf("could not locate the running sasayaki binary: %w", err), repair: true}
+		return
+	}
+	setup.SetBinary(binary)
+	setup.SetProgress(func(line string) { msgs <- setupProgressMsg{line} })
+	session := setup.NewSession(paths)
+	result := session.Run()
+	if !result.AllOK() {
+		msgs <- setupDoneMsg{result: result, repair: true}
+		return
+	}
+	// Desktop integration: Hyprland binding reload + Quickshell restart.
+	// Best-effort across desktops; non-Sumika/Hyprland environments skip.
+	if _, err := exec.LookPath("hyprctl"); err == nil {
+		msgs <- setupProgressMsg{line: "Reloading Hyprland bindings…"}
+		if out, err := exec.Command("hyprctl", "reload").CombinedOutput(); err != nil {
+			msgs <- setupProgressMsg{line: "Warning: could not reload Hyprland: " + strings.TrimSpace(string(out))}
+		}
+	}
+	if _, err := exec.LookPath("sumika-restart"); err == nil {
+		msgs <- setupProgressMsg{line: "Restarting Quickshell integration…"}
+		if out, err := exec.Command("sumika-restart", "--quickshell-only").CombinedOutput(); err != nil {
+			msgs <- setupProgressMsg{line: "Warning: could not restart Quickshell: " + strings.TrimSpace(string(out))}
+		}
+	}
+	// Diagnostics verification: any non-OK check is reported as a failure.
+	report := diagnostics.All(paths)
+	for _, check := range report.Checks {
+		if !check.OK {
+			msgs <- setupProgressMsg{line: "✗ " + check.Name + ": " + check.Detail}
+		}
+	}
+	msgs <- setupDoneMsg{result: result, repair: true}
 }

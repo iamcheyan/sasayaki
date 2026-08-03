@@ -630,7 +630,7 @@ func (m Model) detailCardContent() (string, string, int, int, int) {
 		actions := []struct{ name, desc string }{
 			{"[1] Service Status & Health", "Active (systemd user unit sasayaki.service)"},
 			{"[2] Disable / Stop Service", "Stops Sasayaki service from running in background."},
-			{"[3] Restart / Repair Service", "Restarts the daemon and verifies all sockets."},
+			{"[3] Restart Service", "Restarts the daemon (for quick recovery)."},
 		}
 		for i, act := range actions {
 			isCursor := (i == m.serviceCursor) && (m.activePanel == panelRight)
@@ -735,7 +735,7 @@ func (m Model) footerKeys() string {
 	items := []struct{ key, desc string }{
 		{"←/→", "switch"}, {"↑/↓", "navigate"}, {"Enter", "select"},
 		{"t", "speech test"}, {"Shift+T", "translation test"},
-		{"r", "restart"}, {"?", "help"}, {"q", "quit"},
+		{"r", "repair"}, {"?", "help"}, {"q", "quit"},
 	}
 	parts := make([]string, 0, len(items))
 	for _, item := range items {

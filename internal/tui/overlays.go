@@ -72,7 +72,7 @@ func (m Model) helpBox() string {
 	b.WriteString(m.boxTitle("Help") + "\n\n")
 	rows := [][2]string{
 		{"t / T", "record: start or finish voice input"},
-		{"r / R", "restart: restart systemd background service"},
+		{"r / R", "repair: full batch repair (runtime, model, service, bindings)"},
 		{"s / S", "setup: install or repair the local runtime"},
 		{"d / D", "run a read-only diagnostic report"},
 		{"m / M", "choose or download a local speech model"},
@@ -171,7 +171,11 @@ func (m Model) diagBox() string {
 
 func (m Model) setupBox() string {
 	var b strings.Builder
-	b.WriteString(m.boxTitle("Setup") + "\n\n")
+	title := "Setup"
+	if m.setupRepair {
+		title = "Repair"
+	}
+	b.WriteString(m.boxTitle(title) + "\n\n")
 	if len(m.setupLines) == 0 {
 		b.WriteString("  " + m.theme.base().Foreground(m.theme.muted).Render("Preparing…") + "\n")
 	}
