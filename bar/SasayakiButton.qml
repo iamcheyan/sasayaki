@@ -76,41 +76,24 @@ Item {
         }
     }
 
-    // Clip container so the pulse ring cannot bleed outside the button
-    // bounds and cast a visible shadow on the bar.
-    Item {
-        anchors.centerIn: button
-        width: button.width
-        height: button.height
-        clip: true
-        layer.enabled: false
+    // Breathing inner glow: a translucent fill inside the button circle
+    // that pulses in opacity. Clipped to the button bounds, so it can
+    // never bleed onto the bar.
+    Rectangle {
+        id: glowFill
+        anchors.fill: button
+        radius: width / 2
+        color: root.isRecording ? root.colorRecording
+            : root.isTranscribing || root.isTranslating ? root.colorTranscribing
+            : root.colorRecording
+        visible: root.isActive
+        opacity: 0.12
 
-        Rectangle {
-            id: pulseRing
-            anchors.centerIn: parent
-            width: button.width
-            height: button.height
-            radius: width / 2
-            color: "transparent"
-            border.width: 2
-            border.color: root.isRecording ? root.colorRecording
-                : root.isTranscribing || root.isTranslating ? root.colorTranscribing
-                : root.colorRecording
-            visible: root.isActive
-            opacity: 0.75
-
-            SequentialAnimation on scale {
-                running: root.isRecording
-                loops: Animation.Infinite
-                NumberAnimation { from: 1.0; to: 1.65; duration: 750; easing.type: Easing.OutCubic }
-                NumberAnimation { from: 1.65; to: 1.0; duration: 0 }
-            }
-            SequentialAnimation on opacity {
-                running: root.isRecording || root.isTranscribing || root.isTranslating
-                loops: Animation.Infinite
-                NumberAnimation { to: 0.8; duration: 600; easing.type: Easing.InOutQuad }
-                NumberAnimation { to: 0.1; duration: 600; easing.type: Easing.InOutQuad }
-            }
+        SequentialAnimation on opacity {
+            running: root.isRecording || root.isTranscribing || root.isTranslating
+            loops: Animation.Infinite
+            NumberAnimation { to: 0.35; duration: 700; easing.type: Easing.InOutQuad }
+            NumberAnimation { to: 0.12; duration: 700; easing.type: Easing.InOutQuad }
         }
     }
 
