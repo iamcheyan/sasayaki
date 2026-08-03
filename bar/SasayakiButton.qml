@@ -76,32 +76,41 @@ Item {
         }
     }
 
-    // Pulse ring for recording/transcribing
-    Rectangle {
-        id: pulseRing
+    // Clip container so the pulse ring cannot bleed outside the button
+    // bounds and cast a visible shadow on the bar.
+    Item {
         anchors.centerIn: button
         width: button.width
         height: button.height
-        radius: width / 2
-        color: "transparent"
-        border.width: 2
-        border.color: root.isRecording ? root.colorRecording
-            : root.isTranscribing || root.isTranslating ? root.colorTranscribing
-            : root.colorRecording
-        visible: root.isActive
-        opacity: 0.75
+        clip: true
+        layer.enabled: false
 
-        SequentialAnimation on scale {
-            running: root.isRecording
-            loops: Animation.Infinite
-            NumberAnimation { from: 1.0; to: 1.65; duration: 750; easing.type: Easing.OutCubic }
-            NumberAnimation { from: 1.65; to: 1.0; duration: 0 }
-        }
-        SequentialAnimation on opacity {
-            running: root.isRecording || root.isTranscribing || root.isTranslating
-            loops: Animation.Infinite
-            NumberAnimation { to: 0.8; duration: 600; easing.type: Easing.InOutQuad }
-            NumberAnimation { to: 0.1; duration: 600; easing.type: Easing.InOutQuad }
+        Rectangle {
+            id: pulseRing
+            anchors.centerIn: parent
+            width: button.width
+            height: button.height
+            radius: width / 2
+            color: "transparent"
+            border.width: 2
+            border.color: root.isRecording ? root.colorRecording
+                : root.isTranscribing || root.isTranslating ? root.colorTranscribing
+                : root.colorRecording
+            visible: root.isActive
+            opacity: 0.75
+
+            SequentialAnimation on scale {
+                running: root.isRecording
+                loops: Animation.Infinite
+                NumberAnimation { from: 1.0; to: 1.65; duration: 750; easing.type: Easing.OutCubic }
+                NumberAnimation { from: 1.65; to: 1.0; duration: 0 }
+            }
+            SequentialAnimation on opacity {
+                running: root.isRecording || root.isTranscribing || root.isTranslating
+                loops: Animation.Infinite
+                NumberAnimation { to: 0.8; duration: 600; easing.type: Easing.InOutQuad }
+                NumberAnimation { to: 0.1; duration: 600; easing.type: Easing.InOutQuad }
+            }
         }
     }
 
