@@ -19,6 +19,9 @@ Requires:       xclip
 Requires:       xdotool
 Requires:       ydotool
 Requires:       systemd
+# xprop resolves the focused window on X11 sessions (EWMH) and drives the
+# XWayland paste path; optional but recommended.
+Recommends:     x11-utils
 
 %description
 Sasayaki records audio, transcribes it locally with an offline SenseVoice

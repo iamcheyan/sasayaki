@@ -17,6 +17,7 @@ Depends: ${misc:Depends}, ${shlibs:Depends},
  xclip,
  xdotool,
  ydotool
+Recommends: x11-utils
 Description: Standalone local voice input and speech-to-text
  Sasayaki records audio, transcribes it locally with an offline
  SenseVoice engine, and pastes the result into the focused application.

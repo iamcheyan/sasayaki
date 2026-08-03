@@ -1,6 +1,7 @@
 package paste
 
 import (
+	"encoding/json"
 	"os/exec"
 	"reflect"
 	"strings"
@@ -364,5 +365,245 @@ func TestExecRunnerRunStdinDoesNotBlockOnForkingClipboard(t *testing.T) {
 	}
 	if d := time.Since(start); d > 2*time.Second {
 		t.Fatalf("RunStdin blocked for %v; the forking clipboard daemon held the pipe", d)
+	}
+}
+
+// ---- focused-window resolution backends ----
+
+// swayTree builds a minimal `swaymsg -t get_tree` document with one focused
+// window whose identity is set by the closure.
+func swayTree(focused func(*swayNode)) string {
+	n := swayNode{Focused: true, AppID: new("foot"), Shell: "xdg_shell", PID: 4949}
+	focused(&n)
+	return `{"focused":false,"nodes":[` + mustJSON(n) + `]}`
+}
+
+func mustJSON(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
+// A focused native Wayland window under Sway must resolve to the foot class
+// and use the Shift+Insert chord terminals bind.
+func TestResolveSwayTerminalShiftInsert(t *testing.T) {
+	r := &fakeRunner{present: map[string]bool{"swaymsg": true, "wl-copy": true, "wtype": true},
+		onRun: func(name string, args []string) ([]byte, error) {
+			if name == "swaymsg" {
+				return []byte(swayTree(func(n *swayNode) {})), nil
+			}
+			return nil, nil
+		}}
+	result := PasteWith(r, "hello")
+	if !result.Pasted || result.Backend != "wtype" {
+		t.Fatalf("PasteWith = %+v, want wtype paste", result)
+	}
+	// Clipboard first, then the focus query, then the terminal chord.
+	if len(r.runs) < 3 {
+		t.Fatalf("calls = %+v, want wl-copy + swaymsg + wtype", r.runs)
+	}
+	if got := r.runs[1]; got.name != "swaymsg" || !reflect.DeepEqual(got.args, []string{"-t", "get_tree"}) {
+		t.Fatalf("focus query = %+v, want swaymsg -t get_tree", got)
+	}
+	last := r.runs[len(r.runs)-1]
+	wantChord := []string{"-M", "shift", "-k", "Insert", "-m", "shift"}
+	if last.name != "wtype" || !reflect.DeepEqual(last.args, wantChord) {
+		t.Fatalf("chord = %+v, want wtype %v", last, wantChord)
+	}
+}
+
+// A focused XWayland window under Sway must take the xsel+xdotool path,
+// because Wayland virtual-keyboard tools cannot reach X windows.
+func TestResolveSwayXWayland(t *testing.T) {
+	r := &fakeRunner{present: map[string]bool{"swaymsg": true, "wl-copy": true, "xsel": true, "xdotool": true},
+		onRun: func(name string, args []string) ([]byte, error) {
+			if name == "swaymsg" {
+				return []byte(swayTree(func(n *swayNode) {
+					n.AppID = nil
+					n.WindowProps = &swayWinProps{Class: "Firefox"}
+					n.Shell = "xwayland"
+				})), nil
+			}
+			return nil, nil
+		}}
+	result := PasteWith(r, "hello")
+	if !result.Pasted || result.Backend != "xdotool-x11" {
+		t.Fatalf("PasteWith = %+v, want xdotool-x11 paste", result)
+	}
+	var sawXsel, sawXdotool bool
+	for _, c := range r.runs {
+		if c.name == "xsel" {
+			sawXsel = true
+		}
+		if c.name == "xdotool" && len(c.args) == 3 && c.args[2] == "ctrl+v" {
+			sawXdotool = true
+		}
+	}
+	if !sawXsel || !sawXdotool {
+		t.Fatalf("calls = %+v, want xsel clipboard + xdotool ctrl+v", r.runs)
+	}
+}
+
+// KWin: the scripting plugin is loaded and run over D-Bus, its js: output is
+// scraped from the journal (`journalctl -o cat` prints the bare message, so
+// the lines are exactly `js: <class>`), and the plugin is unloaded again. A
+// foot window must paste with Shift+Insert.
+func TestResolveKWinTerminalShiftInsert(t *testing.T) {
+	t.Setenv("XDG_CURRENT_DESKTOP", "KDE")
+	r := &fakeRunner{present: map[string]bool{"qdbus6": true, "journalctl": true, "wl-copy": true, "wtype": true},
+		onRun: func(name string, args []string) ([]byte, error) {
+			switch {
+			case name == "qdbus6" && len(args) == 5 && args[2] == "org.kde.kwin.Scripting.loadScript":
+				return []byte("Script42"), nil
+			case name == "journalctl":
+				return []byte("js: foot\njs: 4949\n"), nil
+			}
+			return nil, nil
+		}}
+	result := PasteWith(r, "hello")
+	if !result.Pasted || result.Backend != "wtype" {
+		t.Fatalf("PasteWith = %+v, want wtype paste", result)
+	}
+	var ran, unloaded bool
+	for _, c := range r.runs {
+		if c.name == "qdbus6" && len(c.args) == 5 && c.args[2] == "org.kde.kwin.Scripting.loadScript" {
+			ran = true
+		}
+		if c.name == "qdbus6" && len(c.args) == 4 && c.args[2] == "org.kde.kwin.Scripting.unloadScript" {
+			unloaded = true
+		}
+	}
+	if !ran || !unloaded {
+		t.Fatalf("calls = %+v, want loadScript and unloadScript", r.runs)
+	}
+	last := r.runs[len(r.runs)-1]
+	wantChord := []string{"-M", "shift", "-k", "Insert", "-m", "shift"}
+	if last.name != "wtype" || !reflect.DeepEqual(last.args, wantChord) {
+		t.Fatalf("chord = %+v, want wtype %v", last, wantChord)
+	}
+}
+
+// Under a Wayland session, an X window found by the EWMH probe is an
+// XWayland window and must use the xsel+xdotool path.
+func TestResolveX11XWayland(t *testing.T) {
+	t.Setenv("WAYLAND_DISPLAY", "wayland-0")
+	r := &fakeRunner{present: map[string]bool{"xprop": true, "wl-copy": true, "xsel": true, "xdotool": true},
+		onRun: func(name string, args []string) ([]byte, error) {
+			switch {
+			case name == "xprop" && len(args) == 2:
+				return []byte(`_NET_ACTIVE_WINDOW(WINDOW): window id # 0x3e00005`), nil
+			case name == "xprop" && len(args) == 4:
+				return []byte("WM_CLASS(STRING) = \"Navigator\", \"firefox\""), nil
+			}
+			return nil, nil
+		}}
+	result := PasteWith(r, "hello")
+	if !result.Pasted || result.Backend != "xdotool-x11" {
+		t.Fatalf("PasteWith = %+v, want xdotool-x11 paste", result)
+	}
+}
+
+// The EWMH probe resolves the focused window's class and pid from xprop.
+// Under a Wayland session the probed X window is an XWayland window; on
+// plain X11 it is a native one. resolveFocus is tested directly so the
+// Wayland/X11 split is controlled by the caller, not by PasteWith's
+// graphical-environment probe (which re-derives the socket from XDG_RUNTIME_DIR).
+func TestResolveX11Focus(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		wayland      string
+		wantXWayland bool
+	}{
+		{"plain-x11", "", false},
+		{"wayland-session", "wayland-0", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("WAYLAND_DISPLAY", tc.wayland)
+			t.Setenv("XDG_CURRENT_DESKTOP", "Hyprland")
+			r := &fakeRunner{present: map[string]bool{"xprop": true},
+				onRun: func(name string, args []string) ([]byte, error) {
+					switch {
+					case name == "xprop" && len(args) == 2: // -root _NET_ACTIVE_WINDOW
+						return []byte(`_NET_ACTIVE_WINDOW(WINDOW): window id # 0x3e00005`), nil
+					case name == "xprop" && len(args) == 4: // -id <win> WM_CLASS _NET_WM_PID
+						return []byte("WM_CLASS(STRING) = \"Navigator\", \"firefox\"\n_NET_WM_PID(CARDINAL) = 4949"), nil
+					}
+					return nil, nil
+				}}
+			target := resolveFocus(r)
+			if target.Class != "firefox" || target.Pid != 4949 || target.XWayland != tc.wantXWayland {
+				t.Fatalf("resolveFocus = %+v, want class=firefox pid=4949 xwayland=%v", target, tc.wantXWayland)
+			}
+		})
+	}
+}
+
+// KWin script racing the compositor's own runtime (class "js::…") must be
+// treated as a miss so the generic Ctrl+V path is used instead of a bogus
+// class.
+func TestResolveKWinScriptNoiseIgnored(t *testing.T) {
+	t.Setenv("XDG_CURRENT_DESKTOP", "Plasma")
+	r := &fakeRunner{present: map[string]bool{"qdbus": true, "journalctl": true, "wl-copy": true, "wtype": true},
+		onRun: func(name string, args []string) ([]byte, error) {
+			switch {
+			case name == "qdbus" && len(args) == 5 && args[2] == "org.kde.kwin.Scripting.loadScript":
+				return []byte("7"), nil // numeric id: caller must prefix Script
+			case name == "journalctl":
+				return []byte("Aug 03 12:00:00 host js: js::sasayaki_1234\nAug 03 12:00:01 host js: 9999\n"), nil
+			}
+			return nil, nil
+		}}
+	result := PasteWith(r, "hello")
+	if !result.Pasted || result.Backend != "wtype" {
+		t.Fatalf("PasteWith = %+v, want generic wtype paste", result)
+	}
+	last := r.runs[len(r.runs)-1]
+	wantChord := []string{"-M", "ctrl", "-k", "v", "-m", "ctrl"}
+	if !reflect.DeepEqual(last.args, wantChord) {
+		t.Fatalf("chord = %+v, want generic Ctrl+V %v", last, wantChord)
+	}
+}
+
+// GNOME: the window-calls-extended shell extension answers FocusClass over
+// D-Bus; a GUI class keeps the Ctrl+V-first order.
+func TestResolveGNOMEGuiCtrlV(t *testing.T) {
+	t.Setenv("XDG_CURRENT_DESKTOP", "GNOME")
+	r := &fakeRunner{present: map[string]bool{"gdbus": true, "wl-copy": true, "wtype": true},
+		onRun: func(name string, args []string) ([]byte, error) {
+			if name == "gdbus" {
+				return []byte("(<'firefox'>)"), nil
+			}
+			return nil, nil
+		}}
+	result := PasteWith(r, "hello")
+	if !result.Pasted || result.Backend != "wtype" {
+		t.Fatalf("PasteWith = %+v, want wtype paste", result)
+	}
+	last := r.runs[len(r.runs)-1]
+	wantChord := []string{"-M", "ctrl", "-k", "v", "-m", "ctrl"}
+	if !reflect.DeepEqual(last.args, wantChord) {
+		t.Fatalf("chord = %+v, want Ctrl+V %v", last, wantChord)
+	}
+}
+
+// A non-KDE/non-GNOME session with no compositor IPC and no X11 falls back
+// to the generic Ctrl+V chord for an unknown window (the long-standing GUI
+// default).
+func TestResolveFocusUnknownWindowGeneric(t *testing.T) {
+	t.Setenv("XDG_CURRENT_DESKTOP", "Hyprland")
+	t.Setenv("WAYLAND_DISPLAY", "wayland-0")
+	r := fullRunner()
+	result := PasteWith(r, "hello")
+	if !result.Pasted || result.Backend != "wtype" {
+		t.Fatalf("PasteWith = %+v, want wtype paste", result)
+	}
+	want := []cmdCall{
+		{"wl-copy", []string{"--trim-newline"}},
+		{"wtype", []string{"-M", "ctrl", "-k", "v", "-m", "ctrl"}},
+	}
+	if !reflect.DeepEqual(r.runs, want) {
+		t.Fatalf("calls = %+v, want %+v", r.runs, want)
 	}
 }

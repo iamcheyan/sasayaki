@@ -106,20 +106,36 @@ bind = ALT, A, exec, sasayaki toggle
 bind = ALT, SHIFT, A, exec, sasayaki translate-toggle
 ```
 
-### Wayland vs X11 notes
+### Focused-window resolution
+
+Sasayaki picks the paste shortcut from the focused window's class, resolved
+per compositor (first one that reports a window wins):
+
+- **Hyprland** — `hyprctl activewindow`;
+- **Sway** — `swaymsg get_tree`;
+- **KDE Plasma** — KWin scripting over D-Bus (`qdbus6`/`qdbus`);
+- **GNOME** — the third-party `window-calls-extended` shell extension
+  (GNOME Wayland has no official focus API; without the extension the
+  generic shortcut is used);
+- **Any X11 session** (i3, Xfce, KDE/GNOME on X11, …) — the EWMH
+  `_NET_ACTIVE_WINDOW` root property via `xprop`.
+
+Where no backend reports a window, Sasayaki falls back to the generic
+`Ctrl+V` chord.
+
+### Wayland vs X11 paste paths
 
 - **Wayland** (GNOME, KDE, Sway, …): pasting uses the Wayland virtual
   keyboard (`wtype`, fallback `ydotool`). XWayland apps get the X11 path
   (`xsel`/`xclip` + `xdotool`).
-- **X11**: `xdotool` injects into the focused window. No `hyprctl`, so the
-  paste chord is the generic `Ctrl+V` (terminals bind `Shift+Insert`; see
-  below for the tradeoff).
+- **X11**: `xdotool` injects into the focused window.
 
-Without Hyprland, Sasayaki cannot resolve the focused window's class, so it
-uses generic chords (`Ctrl+V`). In terminals `Ctrl+V` is a literal control
-character and will not paste; use a TUI test (`sasayaki`, then `t`) to see
-the raw result, or bind a terminal that accepts `Ctrl+V` paste. On Hyprland
-this is automatic (terminals get `Shift+Insert`/`Ctrl+Shift+V`).
+In terminals, `Ctrl+V` is a literal control character and will not paste;
+terminals are detected by class (foot, kitty, alacritty, …) and get
+`Shift+Insert`/`Ctrl+Shift+V` instead. Where the class stays unknown (no
+backend installed, or a desktop without a focus API), use a TUI test
+(`sasayaki`, then `t`) to see the raw result, or bind a terminal that
+accepts `Ctrl+V` paste.
 
 ## Control center (TUI)
 

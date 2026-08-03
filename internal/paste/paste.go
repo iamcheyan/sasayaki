@@ -24,6 +24,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -91,10 +93,11 @@ const (
 	ClipXsel   = "xsel"
 )
 
-// windowTarget describes the focused window, resolved from Hyprland when
-// available. A zero windowTarget (no Hyprland) falls back to generic chords.
+// windowTarget describes the focused window, resolved from the compositor
+// when it exposes one (Hyprland, Sway, KWin, or plain X11). A zero
+// windowTarget (no backend reported a window) falls back to generic chords.
 type windowTarget struct {
-	Class    string // lowercased WM_CLASS, e.g. "org.mozilla.firefox", "foot"
+	Class    string // lowercased app class, e.g. "org.mozilla.firefox", "foot"
 	Address  string // Hyprland window address "0x...." ("" when unknown)
 	Pid      int
 	XWayland bool
@@ -246,17 +249,35 @@ func pasted(transport string) Result {
 	return Result{Pasted: true, Backend: transport, Detail: "Pasted with " + transport}
 }
 
-// resolveFocus asks Hyprland for the focused window. Returns a zero target
-// when hyprctl is missing or nothing is focused; the caller then falls back
-// to generic chords for an unknown window.
+// resolveFocus asks the compositor for the focused window. Backends are
+// tried in order — Hyprland, Sway, KWin (Plasma), GNOME (via the
+// window-calls-extended shell extension), then plain X11 (EWMH) — and each
+// fails fast when its compositor is absent, so the first success wins. A
+// zero target makes the caller fall back to generic chords.
 func resolveFocus(r runner) windowTarget {
+	for _, fn := range []func(runner) (windowTarget, bool){
+		resolveHyprlandFocus,
+		resolveSwayFocus,
+		resolveKWinFocus,
+		resolveGNOMEFocus,
+		resolveX11Focus,
+	} {
+		if t, ok := fn(r); ok {
+			return t
+		}
+	}
+	return windowTarget{}
+}
+
+// resolveHyprlandFocus asks Hyprland for the focused window.
+func resolveHyprlandFocus(r runner) (windowTarget, bool) {
 	var t windowTarget
 	if _, err := r.LookPath("hyprctl"); err != nil {
-		return t
+		return t, false
 	}
 	out, err := r.Run("hyprctl", "-j", "activewindow")
 	if err != nil {
-		return t
+		return t, false
 	}
 	var w struct {
 		Class    string `json:"class"`
@@ -264,14 +285,286 @@ func resolveFocus(r runner) windowTarget {
 		Pid      int    `json:"pid"`
 		XWayland bool   `json:"xwayland"`
 	}
-	if err := json.Unmarshal(out, &w); err != nil {
-		return t
+	if err := json.Unmarshal(out, &w); err != nil || w.Class == "" {
+		return t, false
 	}
 	t.Class = strings.ToLower(w.Class)
 	t.Address = w.Address
 	t.Pid = w.Pid
 	t.XWayland = w.XWayland
-	return t
+	return t, true
+}
+
+// resolveSwayFocus parses `swaymsg -t get_tree`, walking the node tree for
+// the focused window. Native Wayland windows carry app_id; XWayland windows
+// carry window_properties.class and shell "xwayland".
+func resolveSwayFocus(r runner) (windowTarget, bool) {
+	var t windowTarget
+	if _, err := r.LookPath("swaymsg"); err != nil {
+		return t, false
+	}
+	out, err := r.Run("swaymsg", "-t", "get_tree")
+	if err != nil {
+		return t, false
+	}
+	var root swayNode
+	if err := json.Unmarshal(out, &root); err != nil {
+		return t, false
+	}
+	n, ok := focusedSwayWindow(root)
+	if !ok {
+		return t, false
+	}
+	if n.AppID != nil {
+		t.Class = strings.ToLower(*n.AppID)
+	} else if n.WindowProps != nil {
+		t.Class = strings.ToLower(n.WindowProps.Class)
+	} else {
+		return t, false
+	}
+	t.Pid = n.PID
+	t.XWayland = n.Shell == "xwayland"
+	return t, true
+}
+
+// swayNode is one node of sway's layout tree.
+type swayNode struct {
+	Focused       bool          `json:"focused"`
+	AppID         *string       `json:"app_id"`
+	WindowProps   *swayWinProps `json:"window_properties"`
+	Shell         string        `json:"shell"`
+	PID           int           `json:"pid"`
+	Nodes         []swayNode    `json:"nodes"`
+	FloatingNodes []swayNode    `json:"floating_nodes"`
+}
+
+type swayWinProps struct {
+	Class string `json:"class"`
+}
+
+// focusedSwayWindow walks the tree to the focused window node (the only
+// nodes with focused=true that also carry an app identity).
+func focusedSwayWindow(n swayNode) (swayNode, bool) {
+	if n.Focused && (n.AppID != nil || n.WindowProps != nil) {
+		return n, true
+	}
+	for _, child := range n.Nodes {
+		if w, ok := focusedSwayWindow(child); ok {
+			return w, true
+		}
+	}
+	for _, child := range n.FloatingNodes {
+		if w, ok := focusedSwayWindow(child); ok {
+			return w, true
+		}
+	}
+	return swayNode{}, false
+}
+
+// resolveKWinFocus asks KWin for the focused window by loading a tiny
+// scripting plugin over D-Bus and scraping its print() output from the
+// journal. KWin's queryWindowInfo D-Bus method is interactive (it waits for
+// the user to click a window), so reading workspace.activeWindow from a
+// script and scraping `js:` lines from journalctl is the only general
+// non-interactive path. Fails fast when the session is not Plasma or qdbus/
+// journalctl are absent; a script racing KWin's own runtime (class "js::…")
+// is also treated as a miss.
+func resolveKWinFocus(r runner) (windowTarget, bool) {
+	var t windowTarget
+	if !isKDE(os.Getenv("XDG_CURRENT_DESKTOP")) {
+		return t, false
+	}
+	qdbus := "qdbus6"
+	if _, err := r.LookPath(qdbus); err != nil {
+		qdbus = "qdbus"
+		if _, err := r.LookPath(qdbus); err != nil {
+			return t, false
+		}
+	}
+	if _, err := r.LookPath("journalctl"); err != nil {
+		return t, false
+	}
+	tmp, err := os.CreateTemp("", "sasayaki-kwin-*.js")
+	if err != nil {
+		return t, false
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.WriteString(`if (workspace.activeWindow) { print(workspace.activeWindow.resourceClass); print(workspace.activeWindow.pid); }`); err != nil {
+		tmp.Close()
+		return t, false
+	}
+	tmp.Close()
+	defer os.Remove(tmpName)
+
+	scriptID := fmt.Sprintf("sasayaki_%d", os.Getpid())
+	out, err := r.Run(qdbus, "org.kde.KWin", "/Scripting",
+		"org.kde.kwin.Scripting.loadScript", tmpName, scriptID)
+	if err != nil {
+		return t, false
+	}
+	instance := strings.TrimSpace(firstLine(out))
+	if instance == "" {
+		return t, false
+	}
+	if !strings.HasPrefix(instance, "Script") {
+		instance = "Script" + instance
+	}
+	runPath := "/Scripting/" + instance
+
+	before := time.Now()
+	if _, err := r.Run(qdbus, "org.kde.KWin", runPath, "org.kde.kwin.Script.run"); err != nil {
+		return t, false
+	}
+	// KWin executes scripts asynchronously; give the print() time to land.
+	time.Sleep(150 * time.Millisecond)
+	since := before.Add(-2 * time.Second).Format("2006-01-02 15:04:05")
+	out, err = r.Run("journalctl", "--since", since, "-o", "cat", "--no-pager")
+	if err != nil {
+		return t, false
+	}
+	var jsLines []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "js: "); ok {
+			jsLines = append(jsLines, rest)
+		}
+	}
+	if len(jsLines) < 2 {
+		return t, false
+	}
+	class := jsLines[len(jsLines)-2]
+	if strings.Contains(class, "js::") {
+		return t, false // KWin's scripting runtime briefly became active
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(jsLines[len(jsLines)-1]))
+	// Unload the injected plugin (best effort; it is also removed on exit).
+	_, _ = r.Run(qdbus, "org.kde.KWin", runPath, "org.kde.kwin.Script.stop")
+	_, _ = r.Run(qdbus, "org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting.unloadScript", scriptID)
+
+	t.Class = strings.ToLower(strings.TrimSpace(class))
+	t.Pid = pid
+	return t, t.Class != ""
+}
+
+// isKDE reports whether the desktop session is KDE Plasma.
+func isKDE(desk string) bool {
+	desk = strings.ToLower(desk)
+	return strings.Contains(desk, "kde") || strings.Contains(desk, "plasma")
+}
+
+// resolveGNOMEFocus reads the focused window class from the
+// window-calls-extended GNOME shell extension over D-Bus. GNOME Wayland has
+// no official focus API, so this is the only non-interactive path, and it
+// requires the user to have installed that extension. Any failure (extension
+// absent, no GNOME session) falls through to the next backend.
+func resolveGNOMEFocus(r runner) (windowTarget, bool) {
+	var t windowTarget
+	if !strings.Contains(strings.ToLower(os.Getenv("XDG_CURRENT_DESKTOP")), "gnome") {
+		return t, false
+	}
+	if _, err := r.LookPath("gdbus"); err != nil {
+		return t, false
+	}
+	out, err := r.Run("gdbus", "call", "--session", "--dest", "org.gnome.Shell",
+		"--object-path", "/org/gnome/Shell/Extensions/WindowsExt",
+		"--method", "org.gnome.Shell.Extensions.WindowsExt.FocusClass")
+	if err != nil {
+		return t, false
+	}
+	// gdbus renders the reply as e.g. `(<'firefox'>)`.
+	m := gnomeFocusRe.FindSubmatch(out)
+	if m == nil {
+		return t, false
+	}
+	t.Class = strings.ToLower(string(m[1]))
+	return t, t.Class != ""
+}
+
+var gnomeFocusRe = regexp.MustCompile(`'([^']+)'`)
+
+// resolveX11Focus reads the focused window over the EWMH _NET_ACTIVE_WINDOW
+// root property. This covers every X11 window manager (i3, Xfce, KDE/GNOME
+// on X11, …) and, under a Wayland session, the XWayland window — the only X
+// windows that exist there. Setting XWayland lets the caller use the
+// xsel+xdotool path for it.
+func resolveX11Focus(r runner) (windowTarget, bool) {
+	var t windowTarget
+	if _, err := r.LookPath("xprop"); err != nil {
+		return t, false
+	}
+	out, err := r.Run("xprop", "-root", "_NET_ACTIVE_WINDOW")
+	if err != nil {
+		return t, false
+	}
+	winID := x11WindowID(out)
+	if winID == "" || winID == "0x0" {
+		return t, false
+	}
+	out, err = r.Run("xprop", "-id", winID, "WM_CLASS", "_NET_WM_PID")
+	if err != nil {
+		return t, false
+	}
+	t.Class, t.Pid = parseX11Props(out)
+	t.Class = strings.ToLower(t.Class)
+	// Under Wayland, any X window is an XWayland window.
+	t.XWayland = os.Getenv("WAYLAND_DISPLAY") != ""
+	return t, t.Class != ""
+}
+
+// x11WindowID extracts the window id from an xprop -root line such as
+// `_NET_ACTIVE_WINDOW(WINDOW): window id # 0x3e00005`.
+func x11WindowID(out []byte) string {
+	const marker = "window id # "
+	for _, line := range strings.Split(string(out), "\n") {
+		if i := strings.Index(line, marker); i >= 0 {
+			return strings.TrimSpace(line[i+len(marker):])
+		}
+	}
+	return ""
+}
+
+// parseX11Props extracts the WM_CLASS resource class and _NET_WM_PID from
+// `xprop -id … WM_CLASS _NET_WM_PID` output:
+//
+//	WM_CLASS(STRING) = "instance", "class"
+//	_NET_WM_PID(CARDINAL) = 12345
+func parseX11Props(out []byte) (class string, pid int) {
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "WM_CLASS"):
+			quoted := xpropQuoted(line)
+			if len(quoted) >= 2 {
+				class = quoted[1] // the resource class, not the instance name
+			}
+		case strings.HasPrefix(line, "_NET_WM_PID"):
+			fields := strings.Fields(line)
+			if n := len(fields); n > 0 {
+				if p, err := strconv.Atoi(fields[n-1]); err == nil {
+					pid = p
+				}
+			}
+		}
+	}
+	return class, pid
+}
+
+// xpropQuoted returns the double-quoted strings in an xprop property line,
+// in order.
+func xpropQuoted(line string) []string {
+	var out []string
+	for {
+		i := strings.IndexByte(line, '"')
+		if i < 0 {
+			return out
+		}
+		line = line[i+1:]
+		j := strings.IndexByte(line, '"')
+		if j < 0 {
+			return out
+		}
+		out = append(out, line[:j])
+		line = line[j+1:]
+	}
 }
 
 func isKitty(class string) bool {
