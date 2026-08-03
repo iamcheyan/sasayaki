@@ -71,6 +71,17 @@ Then bind `sasayaki toggle` in KDE, GNOME, Hyprland, Sway, or any other
 desktop's keyboard-shortcut settings. Run `sasayaki shortcut` for
 desktop-specific instructions.
 
+**Using it without Sumika Shell** (any Linux desktop, or none at all) is
+documented in [docs/standalone-usage.md](docs/standalone-usage.md): the two
+driving commands are `sasayaki toggle` (recognize + paste) and
+`sasayaki translate-toggle` (recognize + translate + paste), plus per-desktop
+shortcut setup, Wayland/X11 paste notes, and headless usage.
+
+**Distribution packaging** (RPM/DEB with system dependencies pulled in
+automatically) lives in [packaging/rpm](packaging/rpm/README.md) and
+[packaging/deb](packaging/deb/README.md); build with `make dist/rpm` /
+`make dist/deb`.
+
 ## Commands
 
 ```text
@@ -216,3 +227,4 @@ The visual language is documented in
 The implementation boundary and desktop-integration decisions are in
 [docs/architecture.md](docs/architecture.md). The speech model, checksums,
 measured latency and license are in [docs/model.md](docs/model.md).
+Non-Sumika usage is in [docs/standalone-usage.md](docs/standalone-usage.md).

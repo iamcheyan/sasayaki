@@ -1,0 +1,29 @@
+Source: https://github.com/iamcheyan/sasayaki
+Version: @VERSION@
+Section: sound
+Priority: optional
+Maintainer: Sasayaki contributors <noreply@example.invalid>
+Build-Depends: debhelper-compat (= 13), golang-go
+Standards-Version: 4.6.2
+Homepage: https://github.com/iamcheyan/sasayaki
+
+Package: sasayaki
+Architecture: any
+Depends: ${misc:Depends}, ${shlibs:Depends},
+ python3,
+ pulseaudio-utils,
+ wl-clipboard,
+ wtype,
+ xclip,
+ xdotool,
+ ydotool
+Description: Standalone local voice input and speech-to-text
+ Sasayaki records audio, transcribes it locally with an offline
+ SenseVoice engine, and pastes the result into the focused application.
+ It is a single standalone binary, independent of any desktop environment;
+ when the Sumika Shell desktop is present it additionally registers as a
+ first-class module.
+ .
+ The private Python runtime, speech model, and systemd user service are
+ provisioned per-user by `sasayaki setup`, so they are not package
+ dependencies.
