@@ -2,7 +2,10 @@ package paste
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -358,6 +361,18 @@ func TestExecRunnerRunStdinDoesNotBlockOnForkingClipboard(t *testing.T) {
 	if _, err := exec.LookPath("wl-copy"); err != nil {
 		t.Skip("wl-copy not installed")
 	}
+	// The shell running the tests may carry a stale WAYLAND_DISPLAY from an
+	// earlier session (e.g. Hyprland → labwc switch). Point wl-copy at a
+	// live socket, or skip when there is none.
+	runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
+	if runtimeDir == "" {
+		runtimeDir = fmt.Sprintf("/run/user/%d", os.Getuid())
+	}
+	if wl := liveWaylandDisplay(runtimeDir); wl != "" {
+		t.Setenv("WAYLAND_DISPLAY", wl)
+	} else {
+		t.Skip("no live Wayland socket")
+	}
 	r := execRunner{}
 	start := time.Now()
 	if _, err := r.RunStdin("wl-copy", []string{"--trim-newline"}, []byte("detach-timing-probe")); err != nil {
@@ -366,6 +381,18 @@ func TestExecRunnerRunStdinDoesNotBlockOnForkingClipboard(t *testing.T) {
 	if d := time.Since(start); d > 2*time.Second {
 		t.Fatalf("RunStdin blocked for %v; the forking clipboard daemon held the pipe", d)
 	}
+}
+
+// liveWaylandDisplay returns the first existing wayland-* socket under
+// runtimeDir, or "" when none is live.
+func liveWaylandDisplay(runtimeDir string) string {
+	matches, _ := filepath.Glob(filepath.Join(runtimeDir, "wayland-*"))
+	for _, path := range matches {
+		if socketExists(path) {
+			return filepath.Base(path)
+		}
+	}
+	return ""
 }
 
 // ---- focused-window resolution backends ----
@@ -605,5 +632,72 @@ func TestResolveFocusUnknownWindowGeneric(t *testing.T) {
 	}
 	if !reflect.DeepEqual(r.runs, want) {
 		t.Fatalf("calls = %+v, want %+v", r.runs, want)
+	}
+}
+
+// wlroots resolver must never open a live compositor socket from a fake
+// runner: the raw Wayland client cannot be simulated, so it engages only
+// for the real runner. Fake-runner tests therefore stay hermetic even on a
+// machine with a running labwc session.
+func TestWlrootsResolverSkipsFakeRunner(t *testing.T) {
+	r := &fakeRunner{present: map[string]bool{}}
+	if got, ok := resolveWlrootsFocus(r); ok {
+		t.Fatalf("resolveWlrootsFocus(fakeRunner) = %+v, want miss", got)
+	}
+}
+
+func TestWlrootsStateActivated(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		state []byte
+		want  bool
+	}{
+		{"activated alone", []byte{2, 0, 0, 0}, true},
+		{"maximized+activated", []byte{0, 0, 0, 0, 2, 0, 0, 0}, true},
+		{"activated+fullscreen", []byte{2, 0, 0, 0, 3, 0, 0, 0}, true},
+		{"maximized only", []byte{0, 0, 0, 0}, false},
+		{"fullscreen only", []byte{3, 0, 0, 0}, false},
+		{"empty", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := stateActivated(tc.state); got != tc.want {
+				t.Fatalf("stateActivated(%v) = %v, want %v", tc.state, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWlrootsFocusedToplevelAppID(t *testing.T) {
+	ts := map[uint32]*wlrToplevel{
+		2: {appID: "firefox", activated: false},
+		4: {appID: "foot", activated: true},
+	}
+	if got, ok := focusedToplevelAppID(ts); !ok || got != "foot" {
+		t.Fatalf("focusedToplevelAppID = %q,%v want foot,true", got, ok)
+	}
+
+	// A desktop with no focused window reports no activated toplevel; the
+	// paste must not target a random window.
+	none := map[uint32]*wlrToplevel{2: {appID: "firefox"}}
+	if _, ok := focusedToplevelAppID(none); ok {
+		t.Fatal("focusedToplevelAppID with no activated toplevel should miss")
+	}
+	if _, ok := focusedToplevelAppID(map[uint32]*wlrToplevel{}); ok {
+		t.Fatal("focusedToplevelAppID with no toplevels should miss")
+	}
+}
+
+// Wire-format parsing: the string length field carries the raw length
+// (NUL included) and the argument is padded to 4 bytes; the registry
+// global layout is name, interface, version.
+func TestWlrootsParseGlobal(t *testing.T) {
+	name := uint32Args(45)
+	ver := uint32Args(3)
+	payload := append(name, stringBytes("zwlr_foreign_toplevel_manager_v1")...)
+	payload = append(payload, ver...)
+	gotName, gotIface, gotVer := parseGlobal(payload)
+	if gotName != 45 || gotIface != "zwlr_foreign_toplevel_manager_v1" || gotVer != 3 {
+		t.Fatalf("parseGlobal = %d,%q,%d want 45,zwlr_foreign_toplevel_manager_v1,3",
+			gotName, gotIface, gotVer)
 	}
 }

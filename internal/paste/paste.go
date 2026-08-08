@@ -94,8 +94,9 @@ const (
 )
 
 // windowTarget describes the focused window, resolved from the compositor
-// when it exposes one (Hyprland, Sway, KWin, or plain X11). A zero
-// windowTarget (no backend reported a window) falls back to generic chords.
+// when it exposes one (Hyprland, Sway, wlroots-family compositors such as
+// labwc, KWin, or plain X11). A zero windowTarget (no backend reported a
+// window) falls back to generic chords.
 type windowTarget struct {
 	Class    string // lowercased app class, e.g. "org.mozilla.firefox", "foot"
 	Address  string // Hyprland window address "0x...." ("" when unknown)
@@ -146,7 +147,7 @@ var (
 func Paste(text string) Result { return PasteWith(execRunner{}, text) }
 
 func PasteWith(r runner, text string) Result {
-	ensureGraphicalEnvironment()
+	ensureGraphicalEnvironment(r)
 	payload := []byte(text)
 	if _, copyErr := copyToClipboard(r, payload); copyErr != nil {
 		return Result{Detail: "Clipboard unavailable: " + copyErr.Error() + ". Install wl-clipboard (wl-copy), xclip, or xsel."}
@@ -195,11 +196,30 @@ func PasteWith(r runner, text string) Result {
 // started before the graphical session imported its display variables.
 // systemd may launch sasayaki with XDG_RUNTIME_DIR but without
 // WAYLAND_DISPLAY/DISPLAY; clipboard and input tools then fail even though
-// the sockets are available.
-func ensureGraphicalEnvironment() {
+// the sockets are available. It engages only for the real runner: the
+// session probe reads live logind/proc state that a fake runner cannot
+// simulate, and unit tests must stay hermetic (applySessionEnv overwrites
+// XDG_CURRENT_DESKTOP from the active session).
+func ensureGraphicalEnvironment(r runner) {
+	if _, ok := r.(execRunner); !ok {
+		return
+	}
 	runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
 	if runtimeDir == "" {
 		runtimeDir = fmt.Sprintf("/run/user/%d", os.Getuid())
+	}
+
+	// A boot-enabled user service can also outlive a session switch and keep
+	// display env pointing at the previous compositor (a dead Hyprland
+	// instance, or a labwc test instance on another socket). The compositor
+	// of the user's ACTIVE logind session is authoritative for what they are
+	// looking at right now; when it resolves, use its env and skip the
+	// socket-sniffing fallbacks below.
+	if env := sessionCompositorEnv(); len(env) > 0 {
+		applySessionEnv(env, runtimeDir)
+		if os.Getenv("WAYLAND_DISPLAY") != "" {
+			return
+		}
 	}
 
 	wayland := os.Getenv("WAYLAND_DISPLAY")
@@ -256,6 +276,208 @@ func socketExists(path string) bool {
 	return err == nil && info.Mode()&os.ModeSocket != 0
 }
 
+// sessionCompositorEnv returns the environment of the compositor running in
+// the user's active logind session, or nil when it cannot be determined. A
+// boot-enabled user service inherits the user manager's environment; when
+// the user later logs into a different compositor (Hyprland → labwc or the
+// reverse), the daemon's WAYLAND_DISPLAY / HYPRLAND_INSTANCE_SIGNATURE /
+// DISPLAY still reference the previous session. The compositor process of
+// the currently active session is the authoritative source for the display
+// env the paste must target. Compositors do not always export
+// WAYLAND_DISPLAY in their own environment (some labwc builds do not), so
+// it is derived from the sockets they actually hold open when absent.
+func sessionCompositorEnv() map[string]string {
+	uid := strconv.Itoa(os.Getuid())
+	out, err := commandTimeout(4*time.Second, "loginctl", "list-sessions", "--no-legend").Output()
+	if err != nil {
+		return nil
+	}
+	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[1] != uid {
+			continue
+		}
+		active, scope, desktop := sessionProps(fields[0])
+		if active != "yes" || scope == "" {
+			continue
+		}
+		pid := compositorPIDInScope(scope)
+		if pid == 0 {
+			continue
+		}
+		env := environOf(pid)
+		if env == nil {
+			continue
+		}
+		if env["WAYLAND_DISPLAY"] == "" {
+			env["WAYLAND_DISPLAY"] = waylandDisplayOf(pid)
+		}
+		if env["XDG_CURRENT_DESKTOP"] == "" {
+			env["XDG_CURRENT_DESKTOP"] = desktop
+		}
+		return env
+	}
+	return nil
+}
+
+// commandTimeout builds a context-bounded command so a wedged logind or
+// D-Bus cannot hang a paste.
+func commandTimeout(d time.Duration, name string, args ...string) *exec.Cmd {
+	ctx, cancel := context.WithTimeout(context.Background(), d)
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Cancel = func() error {
+		if err := cmd.Process.Kill(); err != nil {
+			return err
+		}
+		cancel()
+		return nil
+	}
+	return cmd
+}
+
+// sessionProps reports the Active flag, cgroup scope and reported desktop of
+// a logind session. loginctl may reorder requested properties, so the
+// Key=Value form is parsed rather than positional --value output.
+func sessionProps(id string) (active, scope, desktop string) {
+	out, err := commandTimeout(4*time.Second, "loginctl", "show-session", id,
+		"-p", "Active", "-p", "Scope", "-p", "Desktop").Output()
+	if err != nil {
+		return "", "", ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		switch key {
+		case "Active":
+			active = strings.TrimSpace(value)
+		case "Scope":
+			scope = strings.TrimSpace(value)
+		case "Desktop":
+			desktop = strings.TrimSpace(value)
+		}
+	}
+	return active, scope, desktop
+}
+
+// compositorPIDInScope returns the pid of the compositor process inside a
+// logind session cgroup scope, or 0 when none is found. The session leader
+// may have exited while the compositor (its child) keeps running, so the
+// scope is walked rather than trusting the leader pid.
+func compositorPIDInScope(scope string) int {
+	root := fmt.Sprintf("/sys/fs/cgroup/user.slice/user-%d.slice/%s", os.Getuid(), scope)
+	data, err := os.ReadFile(filepath.Join(root, "cgroup.procs"))
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		pid, err := strconv.Atoi(strings.TrimSpace(line))
+		if err != nil || pid <= 0 || !isCompositor(pid) {
+			continue
+		}
+		return pid
+	}
+	return 0
+}
+
+// compositorNames are the process basenames of Wayland compositors whose
+// toplevel state the paste backends can query.
+var compositorNames = map[string]bool{
+	"labwc": true, "hyprland": true, "sway": true, "wayfire": true,
+	"river": true, "hikari": true, "weston": true, "kwin_wayland": true,
+	"mutter": true, "gnome-shell": true,
+}
+
+func isCompositor(pid int) bool {
+	cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		return false
+	}
+	name := filepath.Base(strings.SplitN(string(cmdline), "\x00", 2)[0])
+	return compositorNames[name]
+}
+
+// environOf returns the environment of a process as a map.
+func environOf(pid int) map[string]string {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
+	if err != nil {
+		return nil
+	}
+	env := map[string]string{}
+	for _, kv := range strings.Split(string(data), "\x00") {
+		if i := strings.IndexByte(kv, '='); i > 0 {
+			env[kv[:i]] = kv[i+1:]
+		}
+	}
+	return env
+}
+
+// waylandDisplayOf derives the WAYLAND_DISPLAY value of a process from the
+// unix sockets it holds open, matching socket inodes against /proc/net/unix.
+// This covers compositors that never export the variable in their own
+// environment.
+func waylandDisplayOf(pid int) string {
+	fdDir := fmt.Sprintf("/proc/%d/fd", pid)
+	entries, err := os.ReadDir(fdDir)
+	if err != nil {
+		return ""
+	}
+	inodes := map[string]bool{}
+	for _, e := range entries {
+		target, err := os.Readlink(filepath.Join(fdDir, e.Name()))
+		if err == nil && strings.HasPrefix(target, "socket:[") {
+			inodes[strings.TrimSuffix(strings.TrimPrefix(target, "socket:["), "]")] = true
+		}
+	}
+	if len(inodes) == 0 {
+		return ""
+	}
+	data, err := os.ReadFile("/proc/net/unix")
+	if err != nil {
+		return ""
+	}
+	runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
+	prefix := runtimeDir + "/wayland-"
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 7 || !inodes[fields[6]] {
+			continue
+		}
+		path := strings.Join(fields[7:], " ")
+		if strings.HasPrefix(path, prefix) {
+			return filepath.Base(path)
+		}
+	}
+	return ""
+}
+
+// applySessionEnv applies the display env of the active session's compositor
+// to the daemon. Values are validated against live sockets; stale values are
+// unset so downstream fail-fast resolvers see the truth (a dead Hyprland
+// signature must not make hyprctl connect to a foreign instance).
+func applySessionEnv(env map[string]string, runtimeDir string) {
+	if wl := env["WAYLAND_DISPLAY"]; wl != "" && socketExists(filepath.Join(runtimeDir, wl)) {
+		_ = os.Setenv("WAYLAND_DISPLAY", wl)
+	} else {
+		_ = os.Unsetenv("WAYLAND_DISPLAY")
+	}
+	if d := env["DISPLAY"]; d != "" {
+		_ = os.Setenv("DISPLAY", d)
+	} else {
+		_ = os.Unsetenv("DISPLAY")
+	}
+	if sig := env["HYPRLAND_INSTANCE_SIGNATURE"]; sig != "" &&
+		socketExists(filepath.Join(runtimeDir, "hypr", sig, ".socket.sock")) {
+		_ = os.Setenv("HYPRLAND_INSTANCE_SIGNATURE", sig)
+	} else {
+		_ = os.Unsetenv("HYPRLAND_INSTANCE_SIGNATURE")
+	}
+	if desk := env["XDG_CURRENT_DESKTOP"]; desk != "" {
+		_ = os.Setenv("XDG_CURRENT_DESKTOP", desk)
+	}
+}
+
 func allDigits(value string) bool {
 	for _, r := range value {
 		if r < '0' || r > '9' {
@@ -278,6 +500,7 @@ func resolveFocus(r runner) windowTarget {
 	for _, fn := range []func(runner) (windowTarget, bool){
 		resolveHyprlandFocus,
 		resolveSwayFocus,
+		resolveWlrootsFocus,
 		resolveKWinFocus,
 		resolveGNOMEFocus,
 		resolveX11Focus,
