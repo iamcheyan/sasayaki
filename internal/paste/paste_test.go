@@ -646,6 +646,94 @@ func TestWlrootsResolverSkipsFakeRunner(t *testing.T) {
 	}
 }
 
+func TestWlrootsProbeRecordsGlobals(t *testing.T) {
+	p := &wlrProbe{globals: map[string]bool{}}
+	global := func(name uint32, iface string, version uint32) []byte {
+		data := append(uint32Args(name), stringBytes(iface)...)
+		return append(data, uint32Args(version)...)
+	}
+	p.recordGlobal(global(7, zwlrManagerInterface, 3))
+	if p.managerName != 7 || p.managerVersion != 3 {
+		t.Fatalf("zwlr global not captured: name=%d version=%d", p.managerName, p.managerVersion)
+	}
+	if !p.globals[zwlrManagerInterface] {
+		t.Fatal("zwlr interface missing from globals")
+	}
+	p.recordGlobal(global(9, "zwp_virtual_keyboard_manager_v1", 1))
+	if !p.globals["zwp_virtual_keyboard_manager_v1"] {
+		t.Fatal("virtual-keyboard interface missing from globals")
+	}
+	if p.managerName != 7 {
+		t.Fatalf("unrelated global must not clobber the zwlr capture: name=%d", p.managerName)
+	}
+}
+
+func TestResolveFocusWithBackend(t *testing.T) {
+	tests := []struct {
+		name    string
+		present []string
+		onRun   func(name string, args []string) ([]byte, error)
+		want    string
+	}{
+		{
+			name:    "hyprland",
+			present: []string{"hyprctl"},
+			onRun: func(name string, args []string) ([]byte, error) {
+				if name == "hyprctl" {
+					return []byte(`{"class":"foot","address":"0x1","pid":42,"xwayland":false}`), nil
+				}
+				return nil, nil
+			},
+			want: "hyprland",
+		},
+		{
+			name:    "sway",
+			present: []string{"swaymsg"},
+			onRun: func(name string, args []string) ([]byte, error) {
+				if name == "swaymsg" {
+					return []byte(swayTree(func(n *swayNode) { n.AppID = strPtr("foot") })), nil
+				}
+				return nil, nil
+			},
+			want: "sway",
+		},
+		{
+			name:    "x11",
+			present: []string{"xprop"},
+			onRun: func(name string, args []string) ([]byte, error) {
+				switch {
+				case name == "xprop" && len(args) == 2:
+					return []byte(`_NET_ACTIVE_WINDOW(WINDOW): window id # 0x3e00005`), nil
+				case name == "xprop" && len(args) == 4:
+					return []byte(`WM_CLASS(STRING) = "Navigator", "firefox"`), nil
+				}
+				return nil, nil
+			},
+			want: "x11",
+		},
+		{
+			name:    "nothing",
+			present: []string{},
+			onRun:   func(name string, args []string) ([]byte, error) { return nil, nil },
+			want:    "",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			present := map[string]bool{}
+			for _, tool := range tc.present {
+				present[tool] = true
+			}
+			r := &fakeRunner{present: present, onRun: tc.onRun}
+			if _, backend := resolveFocusWithBackend(r); backend != tc.want {
+				t.Fatalf("resolveFocusWithBackend = %q, want %q", backend, tc.want)
+			}
+		})
+	}
+}
+
+func strPtr(s string) *string { return &s }
+
 func TestWlrootsStateActivated(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

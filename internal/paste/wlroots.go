@@ -101,16 +101,8 @@ func wlrootsFocusedAppID() (string, bool) {
 
 	// Round 1: enumerate globals (get_registry + sync). The sync callback
 	// fires after the initial global list has been delivered.
-	if err := wlRequest(conn, wlDisplayID, wlGetRegistry, uint32Args(probe.registryID)); err != nil {
+	if err := probe.enumerateGlobals(conn); err != nil {
 		return "", false
-	}
-	if err := wlRequest(conn, wlDisplayID, wlSync, uint32Args(probe.callbackID)); err != nil {
-		return "", false
-	}
-	for !probe.callbackDone {
-		if err := probe.dispatch(conn); err != nil {
-			return "", false
-		}
 	}
 	if probe.managerName == 0 {
 		return "", false
@@ -151,6 +143,29 @@ type wlrProbe struct {
 	managerVersion uint32
 	callbackDone   bool
 	toplevels      map[uint32]*wlrToplevel
+	// globals collects every advertised global interface; nil disables
+	// recording. WaylandGlobals fills it for diagnostics; the focus query
+	// does not need it.
+	globals map[string]bool
+}
+
+// enumerateGlobals performs the registry round: get_registry + sync, then
+// dispatches until the sync callback fires after the initial global list.
+// Afterwards managerName/managerVersion hold the zwlr global (when the
+// compositor advertises it) and globals holds every interface name.
+func (p *wlrProbe) enumerateGlobals(conn *net.UnixConn) error {
+	if err := wlRequest(conn, wlDisplayID, wlGetRegistry, uint32Args(p.registryID)); err != nil {
+		return err
+	}
+	if err := wlRequest(conn, wlDisplayID, wlSync, uint32Args(p.callbackID)); err != nil {
+		return err
+	}
+	for !p.callbackDone {
+		if err := p.dispatch(conn); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // wlrToplevel is the subset of zwlr_foreign_toplevel_handle_v1 state the
@@ -171,10 +186,7 @@ func (p *wlrProbe) dispatch(conn *net.UnixConn) error {
 		// wl_display.error / delete_id: nothing to act on.
 	case sender == p.registryID:
 		if opcode == registryGlobal {
-			if name, iface, version := parseGlobal(data); iface == zwlrManagerInterface {
-				p.managerName = name
-				p.managerVersion = version
-			}
+			p.recordGlobal(data)
 		}
 	case sender == p.callbackID:
 		if opcode == wlCallbackDone {
@@ -211,6 +223,46 @@ func focusedToplevelAppID(ts map[uint32]*wlrToplevel) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// recordGlobal handles one wl_registry.global event: it records the
+// interface in globals and captures the zwlr manager's name/version.
+func (p *wlrProbe) recordGlobal(data []byte) {
+	name, iface, version := parseGlobal(data)
+	if p.globals != nil {
+		p.globals[iface] = true
+	}
+	if iface == zwlrManagerInterface {
+		p.managerName = name
+		p.managerVersion = version
+	}
+}
+
+// WaylandGlobals connects to the compositor named by WAYLAND_DISPLAY and
+// returns the global interfaces it advertises, or nil when no Wayland
+// session is reachable. Diagnostics uses it to verify the paste stack:
+// wtype needs zwp_virtual_keyboard_manager_v1, wl-copy needs
+// zwlr_data_control_manager_v1, and focus resolution needs
+// zwlr_foreign_toplevel_manager_v1. labwc, sway, Hyprland and KWin all
+// expose these; a compositor that does not cannot do automatic paste.
+func WaylandGlobals() map[string]bool {
+	conn, err := dialWayland()
+	if err != nil {
+		return nil
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(wlrootsProbeTimeout)); err != nil {
+		return nil
+	}
+	probe := &wlrProbe{
+		registryID: 2,
+		callbackID: 3,
+		globals:    map[string]bool{},
+	}
+	if err := probe.enumerateGlobals(conn); err != nil {
+		return nil
+	}
+	return probe.globals
 }
 
 // stateActivated reports whether a zwlr_foreign_toplevel_handle_v1 state

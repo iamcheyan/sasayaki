@@ -176,3 +176,24 @@ func TestDiagnosticsPasteBackendMissing(t *testing.T) {
 		}
 	}
 }
+
+// The compositor/protocol/focus checks probe live logind and Wayland state
+// that a stub runner cannot simulate; they must degrade to skipped-OK
+// rather than dialing the real compositor from unit tests.
+func TestDiagnosticsLiveChecksSkipWithStubRunner(t *testing.T) {
+	p := testPaths(t)
+	report := AllWith(stubRunner{present: map[string]bool{}}, p)
+	byName := map[string]Check{}
+	for _, check := range report.Checks {
+		byName[check.Name] = check
+	}
+	for _, name := range []string{"compositor", "paste protocols", "focus resolution"} {
+		check, ok := byName[name]
+		if !ok {
+			t.Fatalf("missing check %q", name)
+		}
+		if !check.OK {
+			t.Fatalf("check %q must be skipped-OK with a stub runner, got %+v", name, check)
+		}
+	}
+}

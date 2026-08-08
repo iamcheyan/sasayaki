@@ -271,6 +271,14 @@ func ensureGraphicalEnvironment(r runner) {
 	}
 }
 
+// EnsureDisplayEnv heals stale display env exactly the way the paste path
+// does: when the process env does not point at the active session's
+// compositor, WAYLAND_DISPLAY / DISPLAY / HYPRLAND_INSTANCE_SIGNATURE are
+// re-pointed at it. Diagnostics calls this before probing so a shell
+// started in an old session (a dead wayland-1 from a previous Hyprland
+// login) cannot produce false negatives under labwc.
+func EnsureDisplayEnv() { ensureGraphicalEnvironment(execRunner{}) }
+
 func socketExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.Mode()&os.ModeSocket != 0
@@ -284,13 +292,48 @@ func socketExists(path string) bool {
 // DISPLAY still reference the previous session. The compositor process of
 // the currently active session is the authoritative source for the display
 // env the paste must target. Compositors do not always export
-// WAYLAND_DISPLAY in their own environment (some labwc builds do not), so
-// it is derived from the sockets they actually hold open when absent.
+// WAYLAND_DISPLAY in their own environment (labwc does not), so it is
+// derived from the sockets they actually hold open when absent.
 func sessionCompositorEnv() map[string]string {
+	pid, desktop := activeSessionCompositor()
+	if pid == 0 {
+		return nil
+	}
+	env := environOf(pid)
+	if env == nil {
+		return nil
+	}
+	if env["WAYLAND_DISPLAY"] == "" {
+		env["WAYLAND_DISPLAY"] = waylandDisplayOf(pid)
+	}
+	if env["XDG_CURRENT_DESKTOP"] == "" {
+		env["XDG_CURRENT_DESKTOP"] = desktop
+	}
+	return env
+}
+
+// SessionCompositorName returns the process name of the compositor running
+// in the user's active logind session (labwc, hyprland, sway, …), or ""
+// when it cannot be determined. Diagnostics reports it so the user sees
+// which compositor the paste stack is targeting.
+func SessionCompositorName() string {
+	pid, _ := activeSessionCompositor()
+	if pid == 0 {
+		return ""
+	}
+	return processName(pid)
+}
+
+// activeSessionCompositor returns the pid of the compositor process in the
+// user's active logind session plus the session's reported desktop name,
+// or (0, "") when it cannot be determined. The session leader may have
+// exited while the compositor (its child) keeps running, so the cgroup
+// scope is walked rather than trusting the leader pid.
+func activeSessionCompositor() (pid int, desktop string) {
 	uid := strconv.Itoa(os.Getuid())
 	out, err := commandTimeout(4*time.Second, "loginctl", "list-sessions", "--no-legend").Output()
 	if err != nil {
-		return nil
+		return 0, ""
 	}
 	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
 		fields := strings.Fields(line)
@@ -301,23 +344,11 @@ func sessionCompositorEnv() map[string]string {
 		if active != "yes" || scope == "" {
 			continue
 		}
-		pid := compositorPIDInScope(scope)
-		if pid == 0 {
-			continue
+		if pid := compositorPIDInScope(scope); pid != 0 {
+			return pid, desktop
 		}
-		env := environOf(pid)
-		if env == nil {
-			continue
-		}
-		if env["WAYLAND_DISPLAY"] == "" {
-			env["WAYLAND_DISPLAY"] = waylandDisplayOf(pid)
-		}
-		if env["XDG_CURRENT_DESKTOP"] == "" {
-			env["XDG_CURRENT_DESKTOP"] = desktop
-		}
-		return env
 	}
-	return nil
+	return 0, ""
 }
 
 // commandTimeout builds a context-bounded command so a wedged logind or
@@ -390,12 +421,17 @@ var compositorNames = map[string]bool{
 }
 
 func isCompositor(pid int) bool {
+	return compositorNames[processName(pid)]
+}
+
+// processName returns the process basename from /proc/<pid>/cmdline's
+// argv[0], or "" when the process is gone or unreadable.
+func processName(pid int) string {
 	cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
 	if err != nil {
-		return false
+		return ""
 	}
-	name := filepath.Base(strings.SplitN(string(cmdline), "\x00", 2)[0])
-	return compositorNames[name]
+	return filepath.Base(strings.SplitN(string(cmdline), "\x00", 2)[0])
 }
 
 // environOf returns the environment of a process as a map.
@@ -496,20 +532,48 @@ func pasted(transport string) Result {
 // window-calls-extended shell extension), then plain X11 (EWMH) — and each
 // fails fast when its compositor is absent, so the first success wins. A
 // zero target makes the caller fall back to generic chords.
+// focusBackends is the resolver chain in priority order. Each backend fails
+// fast when its compositor is absent, so the first success wins.
+var focusBackends = []struct {
+	name string
+	fn   func(runner) (windowTarget, bool)
+}{
+	{"hyprland", resolveHyprlandFocus},
+	{"sway", resolveSwayFocus},
+	{"wlroots", resolveWlrootsFocus},
+	{"kwin", resolveKWinFocus},
+	{"gnome", resolveGNOMEFocus},
+	{"x11", resolveX11Focus},
+}
+
 func resolveFocus(r runner) windowTarget {
-	for _, fn := range []func(runner) (windowTarget, bool){
-		resolveHyprlandFocus,
-		resolveSwayFocus,
-		resolveWlrootsFocus,
-		resolveKWinFocus,
-		resolveGNOMEFocus,
-		resolveX11Focus,
-	} {
-		if t, ok := fn(r); ok {
-			return t
+	t, _ := resolveFocusWithBackend(r)
+	return t
+}
+
+// resolveFocusWithBackend returns the focused window and the name of the
+// resolver that found it.
+func resolveFocusWithBackend(r runner) (windowTarget, string) {
+	for _, b := range focusBackends {
+		if t, ok := b.fn(r); ok {
+			return t, b.name
 		}
 	}
-	return windowTarget{}
+	return windowTarget{}, ""
+}
+
+// ProbeFocus resolves the currently focused window with the real resolver
+// chain and returns its class and the resolver backend that identified it.
+// ok is false when no backend could resolve a focused window (empty
+// desktop, or no compositor IPC / Wayland access). Diagnostics uses it to
+// prove the focus path works on the running compositor — under labwc this
+// exercises the raw zwlr_foreign_toplevel_manager_v1 client.
+func ProbeFocus() (class, backend string, ok bool) {
+	t, b := resolveFocusWithBackend(execRunner{})
+	if t.Class == "" {
+		return "", "", false
+	}
+	return t.Class, b, true
 }
 
 // resolveHyprlandFocus asks Hyprland for the focused window.
