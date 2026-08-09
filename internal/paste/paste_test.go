@@ -229,8 +229,10 @@ func TestPasteXWayland(t *testing.T) {
 	}
 }
 
-// kitty gets a native remote paste: one bracketed transaction, resolved to
-// the exact window id so the payload can never land in two kitty windows.
+// kitty gets a bracketed remote paste: one transaction with the exact
+// payload via send-text, resolved to the exact window id so the payload can
+// never land in two kitty windows. `action paste_from_clipboard` is NOT
+// used: it reads kitty's internal clipboard buffer, not the payload.
 func TestPasteKittyRemoteNative(t *testing.T) {
 	r := hyprRunner("kitty", false)
 	r.present["wl-copy"] = true
@@ -245,45 +247,55 @@ func TestPasteKittyRemoteNative(t *testing.T) {
 		return nil, nil
 	}
 	result := PasteWith(r, "hello")
-	if !result.Pasted || result.Backend != "kitty-native-paste" {
+	if !result.Pasted || result.Backend != "kitty-bracketed-send" {
 		t.Fatalf("kitty remote paste failed: %+v", result)
 	}
-	wantAction := []string{"@", "--to", "unix:/tmp/mykitty-4321", "action", "--match", "id:42", "paste_from_clipboard"}
+	wantSend := []string{"@", "--to", "unix:/tmp/mykitty-4321", "send-text", "--match", "id:42", "--stdin", "--bracketed-paste", "auto"}
 	found := false
 	for _, call := range r.runs {
-		if call.name == "kitty" && reflect.DeepEqual(call.args, wantAction) {
+		if call.name == "kitty" && reflect.DeepEqual(call.args, wantSend) {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("expected kitty action %v in %+v", wantAction, r.runs)
+		t.Fatalf("expected kitty send-text %v in %+v", wantSend, r.runs)
+	}
+	// The native paste action must NOT be attempted when send-text succeeds.
+	for _, call := range r.runs {
+		if call.name == "kitty" && len(call.args) > 3 && call.args[3] == "action" {
+			t.Fatalf("paste_from_clipboard action attempted despite successful send-text: %+v", call.args)
+		}
+	}
+	// stdin order: initial wl-copy, kitty send-text, wl-copy restore.
+	if len(r.stdin) != 3 || r.stdin[0] != "hello" || r.stdin[1] != "hello" || r.stdin[2] != "hello" {
+		t.Fatalf("clipboard/send-text stdin = %q, want payload on all three writes", r.stdin)
 	}
 }
 
-// kitty bracketed fallback: clipboard cleared first so OSC 5522 cannot
-// double-paste, then restored with the payload.
+// kitty native paste action is the fallback when send-text fails: clipboard
+// cleared first so OSC 5522 cannot double-paste, then restored with the
+// payload.
 func TestPasteKittyRemoteBracketedFallback(t *testing.T) {
 	r := hyprRunner("kitty", false)
 	r.present["wl-copy"] = true
 	r.present["kitty"] = true
+	r.failStdin = map[string]bool{"kitty": true} // send-text fails
 	r.onRun = func(name string, args []string) ([]byte, error) {
 		switch {
 		case name == "hyprctl" && len(args) == 2 && args[1] == "activewindow":
 			return []byte(`{"class":"kitty","pid":4321,"xwayland":false}`), nil
 		case name == "kitty" && len(args) == 4 && args[1] == "--to" && args[3] == "ls":
 			return []byte(`[{"tabs":[{"windows":[{"id":42}]}]}]`), nil
-		case name == "kitty" && len(args) > 1 && args[1] == "--to" && args[3] == "action":
-			return nil, &runError{"kitty"}
 		}
 		return nil, nil
 	}
 	result := PasteWith(r, "hello")
-	if !result.Pasted || result.Backend != "kitty-bracketed-fallback" {
-		t.Fatalf("kitty bracketed fallback failed: %+v", result)
+	if !result.Pasted || result.Backend != "kitty-native-paste" {
+		t.Fatalf("kitty native paste fallback failed: %+v", result)
 	}
-	// wl-copy -c then send-text with the payload, then restore.
-	// stdin order: initial wl-copy, kitty send-text, wl-copy restore.
-	var clears, sends int
+	// send-text attempted once, then the action fallback; clipboard cleared
+	// and restored around the send.
+	var clears, sends, actions int
 	for _, call := range r.runs {
 		if call.name == "wl-copy" && reflect.DeepEqual(call.args, []string{"-c"}) {
 			clears++
@@ -291,9 +303,12 @@ func TestPasteKittyRemoteBracketedFallback(t *testing.T) {
 		if call.name == "kitty" && len(call.args) > 3 && call.args[3] == "send-text" {
 			sends++
 		}
+		if call.name == "kitty" && len(call.args) > 3 && call.args[3] == "action" {
+			actions++
+		}
 	}
-	if clears != 1 || sends != 1 {
-		t.Fatalf("clears=%d sends=%d, want 1/1", clears, sends)
+	if clears != 1 || sends != 1 || actions != 1 {
+		t.Fatalf("clears=%d sends=%d actions=%d, want 1/1/1", clears, sends, actions)
 	}
 	if len(r.stdin) != 3 || r.stdin[0] != "hello" || r.stdin[1] != "hello" || r.stdin[2] != "hello" {
 		t.Fatalf("clipboard/send-text stdin = %q, want payload on all three writes", r.stdin)
@@ -819,11 +834,11 @@ func TestPasteKittySkipsUnfocusedInstance(t *testing.T) {
 		return nil, nil
 	}
 	ok, transport := tryKittySockets(r, []string{"/tmp/mykitty-111", "/tmp/mykitty-222"}, 0, []byte("hello"))
-	if !ok || transport != "kitty-native-paste" {
-		t.Fatalf("tryKittySockets = %v,%q want kitty-native-paste", ok, transport)
+	if !ok || transport != "kitty-bracketed-send" {
+		t.Fatalf("tryKittySockets = %v,%q want kitty-bracketed-send", ok, transport)
 	}
-	// The paste action must target the focused instance's window id 42.
-	want := []string{"@", "--to", "unix:/tmp/mykitty-222", "action", "--match", "id:42", "paste_from_clipboard"}
+	// The paste must target the focused instance's window id 42.
+	want := []string{"@", "--to", "unix:/tmp/mykitty-222", "send-text", "--match", "id:42", "--stdin", "--bracketed-paste", "auto"}
 	found := false
 	for _, call := range r.runs {
 		if call.name == "kitty" && reflect.DeepEqual(call.args, want) {
@@ -831,12 +846,12 @@ func TestPasteKittySkipsUnfocusedInstance(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("expected action %v in %+v", want, r.runs)
+		t.Fatalf("expected send-text %v in %+v", want, r.runs)
 	}
-	// No paste action may target the background instance.
+	// No paste may target the background instance.
 	for _, call := range r.runs {
-		if call.name == "kitty" && len(call.args) > 3 && call.args[1] == "--to" && strings.Contains(call.args[2], "mykitty-111") && call.args[3] == "action" {
-			t.Fatalf("background instance received a paste action: %v", call.args)
+		if call.name == "kitty" && len(call.args) > 3 && call.args[1] == "--to" && strings.Contains(call.args[2], "mykitty-111") && (call.args[3] == "send-text" || call.args[3] == "action") {
+			t.Fatalf("background instance received a paste: %v", call.args)
 		}
 	}
 }
@@ -856,8 +871,8 @@ func TestPasteKittyPidSocketAuthoritativeWithoutFocusFlag(t *testing.T) {
 		return nil, nil
 	}
 	ok, transport := tryKittySockets(r, []string{"/tmp/mykitty-4321"}, 4321, []byte("hello"))
-	if !ok || transport != "kitty-native-paste" {
-		t.Fatalf("tryKittySockets = %v,%q want kitty-native-paste", ok, transport)
+	if !ok || transport != "kitty-bracketed-send" {
+		t.Fatalf("tryKittySockets = %v,%q want kitty-bracketed-send", ok, transport)
 	}
 }
 

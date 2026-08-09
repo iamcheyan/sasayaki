@@ -1165,9 +1165,14 @@ func resolveKittyWindowID(ls []byte, requireFocused bool) (int64, bool) {
 // remote call. toArg is "unix:<socket>" or "" for kitty's default socket.
 // requireFocused restricts the target to an OS window kitty reports as
 // compositor-focused, so a background instance can never swallow the paste.
-// kitty's native paste action is tried first; the bracketed send-text
-// fallback clears the clipboard first so kitty's OSC 5522 enhanced paste
-// cannot request the Wayland selection as a second payload, then restores it.
+// The payload is delivered with `send-text --bracketed-paste auto` — NOT
+// `action paste_from_clipboard`: that action reads kitty's internal
+// clipboard buffer (`clipboard_control` grants write access by default, no
+// read), which holds whatever the user last copied inside kitty, not the
+// payload this helper was asked to paste. The clipboard is cleared first so
+// kitty's OSC 5522 enhanced paste cannot request the Wayland selection as a
+// second payload, then restored. The native paste action remains only as a
+// fallback for kitty builds without a working send-text.
 func sendToKitty(r runner, toArg string, payload []byte, requireFocused bool) (bool, string) {
 	lsArgs := []string{"@", "ls"}
 	if toArg != "" {
@@ -1183,9 +1188,6 @@ func sendToKitty(r runner, toArg string, payload []byte, requireFocused bool) (b
 	}
 	match := fmt.Sprintf("id:%d", winID)
 
-	if _, err := r.Run("kitty", kittyArgs(toArg, "action", "--match", match, "paste_from_clipboard")...); err == nil {
-		return true, "kitty-native-paste"
-	}
 	if _, err := r.LookPath(ClipWlCopy); err == nil {
 		_, _ = r.Run(ClipWlCopy, "-c") // clear: OSC 5522 must not double-paste
 	}
@@ -1195,7 +1197,10 @@ func sendToKitty(r runner, toArg string, payload []byte, requireFocused bool) (b
 		_, _ = r.RunStdin(ClipWlCopy, []string{"--trim-newline"}, payload) // restore
 	}
 	if sendErr == nil {
-		return true, "kitty-bracketed-fallback"
+		return true, "kitty-bracketed-send"
+	}
+	if _, err := r.Run("kitty", kittyArgs(toArg, "action", "--match", match, "paste_from_clipboard")...); err == nil {
+		return true, "kitty-native-paste"
 	}
 	return false, ""
 }
