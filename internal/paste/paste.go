@@ -1035,17 +1035,38 @@ func firstLine(b []byte) string {
 // pasteKittyRemote asks kitty to perform one native paste in the exact
 // target window. This preserves bracketed-paste semantics (TUIs receive the
 // payload as one transaction) without re-injecting a keyboard shortcut.
+// The resolver's pid (Hyprland/sway) names the exact instance, so that
+// socket is authoritative. Without a pid — the wlroots probe has no pid
+// event — every socket is only a candidate: several kitty instances share
+// the /tmp/mykitty-* glob, and the first match is usually an old background
+// window. In that case only an instance kitty itself reports as focused may
+// receive the paste; if none does, return false and let the chord path
+// (wtype) target the compositor-focused window instead.
 func pasteKittyRemote(r runner, t windowTarget, payload []byte) (bool, string) {
 	if _, err := r.LookPath("kitty"); err != nil {
 		return false, ""
 	}
-	for _, sock := range kittySockets(t.Pid) {
-		if ok, transport := sendToKitty(r, "unix:"+sock, payload); ok {
+	return tryKittySockets(r, kittySockets(t.Pid), t.Pid, payload)
+}
+
+// tryKittySockets tries each candidate socket in order. Sockets that were
+// not pid-addressed by the resolver require kitty to report compositor
+// focus before receiving the paste; the pid-addressed socket (when the
+// resolver saw one) is authoritative. The default socket from kitty's own
+// environment is tried last — with the focus requirement still enforced
+// when the resolver could not pin an instance.
+func tryKittySockets(r runner, socks []string, pid int, payload []byte) (bool, string) {
+	pidSock := ""
+	if pid > 0 {
+		pidSock = fmt.Sprintf("/tmp/mykitty-%d", pid)
+	}
+	for _, sock := range socks {
+		if ok, transport := sendToKitty(r, "unix:"+sock, payload, sock != pidSock); ok {
 			return true, transport
 		}
 	}
 	// Last resort: kitty's default socket from its own environment.
-	if ok, transport := sendToKitty(r, "", payload); ok {
+	if ok, transport := sendToKitty(r, "", payload, pid == 0); ok {
 		return true, transport
 	}
 	return false, ""
@@ -1097,35 +1118,43 @@ type kittyWindow struct {
 	ID        int64 `json:"id"`
 }
 
-func resolveKittyWindowID(ls []byte) (int64, bool) {
+// resolveKittyWindowID extracts the kitty window id to paste into from a
+// `kitty @ ls` document. When requireFocused is set, only an OS window that
+// kitty reports as compositor-focused is eligible — a background instance
+// must never receive the paste, or the text lands in a window the user is
+// not looking at while the daemon logs success.
+func resolveKittyWindowID(ls []byte, requireFocused bool) (int64, bool) {
 	var osWindows []kittyOSWindow
 	if err := json.Unmarshal(ls, &osWindows); err != nil || len(osWindows) == 0 {
 		return 0, false
 	}
-	osw := osWindows[0]
-	for _, w := range osWindows {
-		if w.IsFocused {
-			osw = w
+	osw := &osWindows[0]
+	for i := range osWindows {
+		if osWindows[i].IsFocused {
+			osw = &osWindows[i]
 			break
 		}
+	}
+	if requireFocused && !osw.IsFocused {
+		return 0, false
 	}
 	if len(osw.Tabs) == 0 {
 		return 0, false
 	}
-	tab := osw.Tabs[0]
-	for _, t := range osw.Tabs {
-		if t.IsActive {
-			tab = t
+	tab := &osw.Tabs[0]
+	for i := range osw.Tabs {
+		if osw.Tabs[i].IsActive {
+			tab = &osw.Tabs[i]
 			break
 		}
 	}
 	if len(tab.Windows) == 0 {
 		return 0, false
 	}
-	w := tab.Windows[0]
-	for _, c := range tab.Windows {
-		if c.IsFocused {
-			w = c
+	w := &tab.Windows[0]
+	for i := range tab.Windows {
+		if tab.Windows[i].IsFocused {
+			w = &tab.Windows[i]
 			break
 		}
 	}
@@ -1134,10 +1163,12 @@ func resolveKittyWindowID(ls []byte) (int64, bool) {
 
 // sendToKitty pastes the payload into the resolved kitty window via one
 // remote call. toArg is "unix:<socket>" or "" for kitty's default socket.
+// requireFocused restricts the target to an OS window kitty reports as
+// compositor-focused, so a background instance can never swallow the paste.
 // kitty's native paste action is tried first; the bracketed send-text
 // fallback clears the clipboard first so kitty's OSC 5522 enhanced paste
 // cannot request the Wayland selection as a second payload, then restores it.
-func sendToKitty(r runner, toArg string, payload []byte) (bool, string) {
+func sendToKitty(r runner, toArg string, payload []byte, requireFocused bool) (bool, string) {
 	lsArgs := []string{"@", "ls"}
 	if toArg != "" {
 		lsArgs = []string{"@", "--to", toArg, "ls"}
@@ -1146,7 +1177,7 @@ func sendToKitty(r runner, toArg string, payload []byte) (bool, string) {
 	if err != nil {
 		return false, ""
 	}
-	winID, ok := resolveKittyWindowID(out)
+	winID, ok := resolveKittyWindowID(out, requireFocused)
 	if !ok {
 		return false, ""
 	}

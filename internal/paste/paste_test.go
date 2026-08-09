@@ -789,3 +789,94 @@ func TestWlrootsParseGlobal(t *testing.T) {
 			gotName, gotIface, gotVer)
 	}
 }
+
+// kitty ls document for one OS window. focusedOS selects the OS-window
+// focus flag; winFocused selects the inner-window focus flag.
+func kittyLSDoc(focusedOS, winFocused bool) []byte {
+	return []byte(fmt.Sprintf(`[{"is_focused":%t,"tabs":[{"is_active":true,"windows":[{"is_focused":%t,"id":42}]}]}]`, focusedOS, winFocused))
+}
+
+// Multiple kitty instances, resolver pid unknown (wlroots probe has no pid
+// event): the socket glob order is arbitrary, so an instance kitty reports
+// as NOT compositor-focused must be skipped, and the paste must land in the
+// focused instance — even when it is not first in the list. Before the fix
+// the first glob match (usually the oldest background window) swallowed the
+// paste and the daemon logged success while the user saw nothing.
+func TestPasteKittySkipsUnfocusedInstance(t *testing.T) {
+	r := &fakeRunner{present: map[string]bool{
+		"wl-copy": true, "wtype": true, "kitty": true,
+	}}
+	r.onRun = func(name string, args []string) ([]byte, error) {
+		switch {
+		case name == "kitty" && len(args) == 4 && args[1] == "--to" && args[3] == "ls":
+			switch args[2] {
+			case "unix:/tmp/mykitty-111": // background instance: not focused
+				return kittyLSDoc(false, true), nil
+			case "unix:/tmp/mykitty-222": // focused instance
+				return kittyLSDoc(true, true), nil
+			}
+		}
+		return nil, nil
+	}
+	ok, transport := tryKittySockets(r, []string{"/tmp/mykitty-111", "/tmp/mykitty-222"}, 0, []byte("hello"))
+	if !ok || transport != "kitty-native-paste" {
+		t.Fatalf("tryKittySockets = %v,%q want kitty-native-paste", ok, transport)
+	}
+	// The paste action must target the focused instance's window id 42.
+	want := []string{"@", "--to", "unix:/tmp/mykitty-222", "action", "--match", "id:42", "paste_from_clipboard"}
+	found := false
+	for _, call := range r.runs {
+		if call.name == "kitty" && reflect.DeepEqual(call.args, want) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected action %v in %+v", want, r.runs)
+	}
+	// No paste action may target the background instance.
+	for _, call := range r.runs {
+		if call.name == "kitty" && len(call.args) > 3 && call.args[1] == "--to" && strings.Contains(call.args[2], "mykitty-111") && call.args[3] == "action" {
+			t.Fatalf("background instance received a paste action: %v", call.args)
+		}
+	}
+}
+
+// With a resolver pid (Hyprland/sway), the pid-addressed socket is
+// authoritative even if kitty's focus report lags: the resolver saw that
+// window focused.
+func TestPasteKittyPidSocketAuthoritativeWithoutFocusFlag(t *testing.T) {
+	r := &fakeRunner{present: map[string]bool{
+		"wl-copy": true, "wtype": true, "kitty": true,
+	}}
+	r.onRun = func(name string, args []string) ([]byte, error) {
+		switch {
+		case name == "kitty" && len(args) == 4 && args[1] == "--to" && args[3] == "ls":
+			return kittyLSDoc(false, true), nil // OS focus flag absent
+		}
+		return nil, nil
+	}
+	ok, transport := tryKittySockets(r, []string{"/tmp/mykitty-4321"}, 4321, []byte("hello"))
+	if !ok || transport != "kitty-native-paste" {
+		t.Fatalf("tryKittySockets = %v,%q want kitty-native-paste", ok, transport)
+	}
+}
+
+// When every instance is unfocused, kitty-native must fail so the chord
+// path (wtype) targets the compositor-focused window.
+func TestPasteKittyNoFocusedInstanceFallsThrough(t *testing.T) {
+	r := &fakeRunner{present: map[string]bool{
+		"wl-copy": true, "wtype": true, "kitty": true,
+	}}
+	r.onRun = func(name string, args []string) ([]byte, error) {
+		switch {
+		case name == "kitty" && len(args) == 4 && args[1] == "--to" && args[3] == "ls":
+			return kittyLSDoc(false, true), nil
+		case name == "kitty" && len(args) == 2 && args[1] == "ls":
+			return kittyLSDoc(false, true), nil // default socket also unfocused
+		}
+		return nil, nil
+	}
+	if ok, transport := tryKittySockets(r, []string{"/tmp/mykitty-111"}, 0, []byte("hello")); ok {
+		t.Fatalf("tryKittySockets = true,%q want fallthrough", transport)
+	}
+}
