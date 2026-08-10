@@ -232,13 +232,20 @@ func runRepair(paths config.Paths) error {
 // Sumika are refreshed when present, while standalone installations simply
 // skip those integration steps.
 func repairDesktopIntegration() error {
-	if hyprctl, err := exec.LookPath("hyprctl"); err == nil {
-		if output, err := exec.Command(hyprctl, "reload").CombinedOutput(); err != nil {
-			return fmt.Errorf("could not reload Hyprland bindings: %w: %s", err, strings.TrimSpace(string(output)))
+	// Reload Hyprland bindings only when a live Hyprland instance exists.
+	// hyprctl may be installed while the session runs labwc/sway (no
+	// instance), in which case the reload fails and must not abort the rest.
+	if sig := os.Getenv("HYPRLAND_INSTANCE_SIGNATURE"); sig != "" {
+		if hyprctl, err := exec.LookPath("hyprctl"); err == nil {
+			if output, err := exec.Command(hyprctl, "reload").CombinedOutput(); err != nil {
+				return fmt.Errorf("could not reload Hyprland bindings: %w: %s", err, strings.TrimSpace(string(output)))
+			}
+			fmt.Println("  [ok ] Reloaded Hyprland bindings")
+		} else {
+			fmt.Println("  [-- ] Hyprland not found; skipped desktop binding reload")
 		}
-		fmt.Println("  [ok ] Reloaded Hyprland bindings")
 	} else {
-		fmt.Println("  [-- ] Hyprland not found; skipped desktop binding reload")
+		fmt.Println("  [-- ] No Hyprland session; skipped desktop binding reload")
 	}
 
 	if restart, err := exec.LookPath("sumika-restart"); err == nil {
