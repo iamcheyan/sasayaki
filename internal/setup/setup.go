@@ -280,7 +280,22 @@ func unitCurrent(p config.Paths) bool {
 	if err != nil {
 		return false
 	}
-	return strings.Contains(string(b), "ExecStart="+serviceBinary+" serve")
+	text := string(b)
+	if !strings.Contains(text, "ExecStart="+serviceBinary+" serve") {
+		return false
+	}
+	// Re-render units created by older Sasayaki versions. In particular,
+	// NixOS keeps parecord and the C++ runtime outside /usr/bin; an old fixed
+	// PATH makes the repair button appear to succeed while recording fails.
+	if _, err := os.Stat("/run/current-system/sw/bin"); err == nil &&
+		!strings.Contains(text, "Environment=PATH=/run/current-system/sw/bin") {
+		return false
+	}
+	if _, err := os.Stat("/nix/store"); err == nil &&
+		!strings.Contains(text, "Environment=LD_LIBRARY_PATH=") {
+		return false
+	}
+	return true
 }
 
 // fileExists is a tiny helper kept local to setup.
