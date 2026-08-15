@@ -937,9 +937,10 @@ func sendChord(r runner, ch chord, t windowTarget) (bool, string) {
 			return true, BackendYdotool
 		}
 	}
-	if ok, transport := sendHyprland(r, ch, t); ok {
-		return true, transport
-	}
+	// Do not treat Hyprland's experimental send_key_state dispatch as a
+	// successful paste. The dispatch can return zero without delivering the
+	// chord to the client, producing a false "paste succeeded" result. Use a
+	// real virtual-keyboard backend (wtype/ydotool) or report clipboard-only.
 	if _, err := r.LookPath(BackendXdotool); err == nil {
 		if _, err := r.Run(BackendXdotool, "key", "--clearmodifiers", ch.xdotool); err == nil {
 			return true, BackendXdotool

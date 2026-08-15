@@ -181,15 +181,15 @@ func TestPasteFallbackOrder(t *testing.T) {
 	}
 }
 
-// Hyprland send_key_state is the fallback when wtype/ydotool fail; it must
-// target the focused window explicitly.
-func TestPasteHyprlandSendKeyFallback(t *testing.T) {
+// A successful hyprctl dispatch does not prove the client received the key.
+// When real virtual-keyboard backends fail, report clipboard-only truthfully.
+func TestPasteDoesNotClaimHyprlandDispatchSuccess(t *testing.T) {
 	r := hyprRunner("org.kde.kwrite", false)
 	r.present["ydotool"] = true
 	r.failRun = map[string]bool{"wtype": true, "ydotool": true}
 	result := PasteWith(r, "text")
-	if !result.Pasted || result.Backend != "hyprland" {
-		t.Fatalf("hyprland fallback failed: %+v", result)
+	if result.Pasted || result.Backend != "clipboard" {
+		t.Fatalf("expected truthful clipboard fallback: %+v", result)
 	}
 	var dispatches []string
 	for _, call := range r.runs {
@@ -197,12 +197,8 @@ func TestPasteHyprlandSendKeyFallback(t *testing.T) {
 			dispatches = append(dispatches, call.args[1])
 		}
 	}
-	want := []string{
-		`hl.dsp.send_key_state({ mods = "CTRL", key = "V", state = "down", window = "0xaaabc832aea0" })`,
-		`hl.dsp.send_key_state({ mods = "CTRL", key = "V", state = "up", window = "0xaaabc832aea0" })`,
-	}
-	if !reflect.DeepEqual(dispatches, want) {
-		t.Fatalf("dispatches = %v, want %v", dispatches, want)
+	if len(dispatches) != 0 {
+		t.Fatalf("unverifiable Hyprland dispatches must not run: %v", dispatches)
 	}
 }
 
