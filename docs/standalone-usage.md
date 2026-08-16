@@ -66,7 +66,13 @@ sasayaki cancel            # cancel an active recording/transcription
 ```
 
 `toggle` is a toggle: the first press starts recording, the second stops and
-pastes. There is no separate "stop" command. If you want cancel-on-`Escape`
+pastes. There is no separate "stop" command.
+
+A CapsLock tap can drive the same command (see
+[architecture](architecture.md) / [wake-keys.md](wake-keys.md) for
+how Sumika wires it); on other desktops bind `sasayaki toggle` to
+`CapsLock` yourself — release-only if your compositor supports it, so
+chords like `Ctrl+C` (when you swap ctrl/caps) still reach apps. If you want cancel-on-`Escape`
 like the Sumika integration, bind `sasayaki cancel` to `Escape` in your
 desktop (Hyprland users get it automatically).
 

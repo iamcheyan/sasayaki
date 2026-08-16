@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -119,6 +120,7 @@ type Model struct {
 	targetCursor      int
 	shortcutCursor    int
 	serviceCursor     int
+	wakeCursor        int
 	diagCursor        int
 	testResultScroll  int  // recognition pane scroll offset
 	testLogScroll     int  // logs pane scroll offset
@@ -531,7 +533,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	const menuCount = 9
+	const menuCount = 10
 	speechLangs := []string{"auto", "zh", "en", "ja", "ko", "yue"}
 	targetLangs := []string{"Japanese", "English", "Chinese", "Korean", "Spanish", "French", "German"}
 
@@ -793,6 +795,22 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.overlay = overlayLogs
 			return m, logsCmd(time.Time{})
 		}
+
+	case 9: // Voice Wake Keys (matrix: capslock / leftctrl / rightctrl)
+		switch key {
+		case "up", "k":
+			m.wakeCursor = (m.wakeCursor + 2) % 3
+			return m, nil
+		case "down", "j":
+			m.wakeCursor = (m.wakeCursor + 1) % 3
+			return m, nil
+		case "1", "2", "3":
+			idx := int(key[0] - '1')
+			m.wakeCursor = idx
+			return m, toggleWakeKeyCmd(m.paths, wakeKeyByIDX(idx))
+		case "enter", " ":
+			return m, toggleWakeKeyCmd(m.paths, wakeKeyByIDX(m.wakeCursor))
+		}
 	}
 
 	return m, nil
@@ -818,6 +836,98 @@ func saveCfgCmd(paths config.Paths, mutate func(*config.Config) string) tea.Cmd 
 		}
 		return cfgMsg{cfg: cfg, notice: notice}
 	}
+}
+
+// toggleCapsWake flips the CapsLock-wake setting, persists it and reloads the
+// Hyprland binds so the voicetap keybind appears/disappears immediately.
+// applyKeyboardRemap re-renders the keyd config so the caps-position
+// overload(leftcontrol, f24) follows the wake setting. Best-effort; skipped
+// when the Sumika keyboard-remap extension is absent (plain swap stays).
+func applyKeyboardRemap() {
+	dataHome := os.Getenv("XDG_DATA_HOME")
+	if dataHome == "" {
+		dataHome = filepath.Join(os.Getenv("HOME"), ".local", "share")
+	}
+	extDir := os.Getenv("SUMIKA_SHELL_EXTENSIONS_DIR")
+	if extDir == "" {
+		extDir = filepath.Join(dataHome, "sumika-shell", "extensions")
+	}
+	apply := filepath.Join(extDir, "keyboard-remap", "bin", "omarchy-keyboard-apply")
+	if _, err := os.Stat(apply); err != nil {
+		return
+	}
+	_ = exec.Command(apply).Run()
+}
+
+// wakeKeyByIDX maps the menu-row index to the wake-key CLI name.
+func wakeKeyByIDX(idx int) string {
+	switch idx {
+	case 0:
+		return "capslock"
+	case 1:
+		return "leftctrl"
+	default:
+		return "rightctrl"
+	}
+}
+
+// toggleWakeKeyCmd flips one wake key, persists, and refreshes the live
+// Hyprland binds (plus the keyd overload when the caps position changes).
+func toggleWakeKeyCmd(paths config.Paths, key string) tea.Cmd {
+	return func() tea.Msg {
+		cfg, err := config.Load(paths)
+		if err != nil {
+			return noticeMsg{text: "Could not load config: " + err.Error()}
+		}
+		label := key
+		switch key {
+		case "capslock":
+			cfg.WakeKeys.CapsLock = !cfg.WakeKeys.CapsLock
+			label = "CapsLock"
+		case "leftctrl":
+			cfg.WakeKeys.LeftCtrl = !cfg.WakeKeys.LeftCtrl
+			label = "LeftCtrl"
+		case "rightctrl":
+			cfg.WakeKeys.RightCtrl = !cfg.WakeKeys.RightCtrl
+			label = "RightCtrl"
+		default:
+			return noticeMsg{text: "Unknown wake key: " + key}
+		}
+		if err := config.Save(paths, cfg); err != nil {
+			return noticeMsg{text: "Could not save config: " + err.Error()}
+		}
+		if sig := os.Getenv("HYPRLAND_INSTANCE_SIGNATURE"); sig != "" {
+			if hyprctl, lookErr := exec.LookPath("hyprctl"); lookErr == nil {
+				_ = exec.Command(hyprctl, "reload").Run()
+			}
+		}
+		// Re-render keyd so the caps-position overload follows the setting
+		// (best-effort; the CLI has the same call).
+		if key == "capslock" {
+			applyKeyboardRemap()
+		}
+		state := "OFF"
+		if cfg.WakeKeys.Any() {
+			state = "ON"
+		}
+		keyState := "off"
+		switch key {
+		case "capslock":
+			keyState = onOff(cfg.WakeKeys.CapsLock)
+		case "leftctrl":
+			keyState = onOff(cfg.WakeKeys.LeftCtrl)
+		case "rightctrl":
+			keyState = onOff(cfg.WakeKeys.RightCtrl)
+		}
+		return cfgMsg{cfg: cfg, notice: label + " wake " + keyState + " (wake " + state + ")"}
+	}
+}
+
+func onOff(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
 }
 
 func setLanguageCmd(paths config.Paths, langCode string) tea.Cmd {

@@ -78,6 +78,18 @@ func main() {
 		fail(runCancel(paths))
 	case "bindings":
 		runBindings(paths)
+	case "wake":
+		wakeKey, wakeArg := "", ""
+		if len(args) > 1 {
+			wakeKey = args[1]
+		}
+		if len(args) > 2 {
+			wakeArg = args[2]
+		}
+		os.Exit(runWake(paths, wakeKey, wakeArg))
+	case "capslock":
+		// Compatibility alias: `sasayaki capslock …` === `sasayaki wake capslock …`
+		os.Exit(runWake(paths, "capslock", firstArg(args)))
 	case "status":
 		code := runStatus(paths, hasJSONFlag(args[1:]))
 		os.Exit(code)
@@ -232,20 +244,8 @@ func runRepair(paths config.Paths) error {
 // Sumika are refreshed when present, while standalone installations simply
 // skip those integration steps.
 func repairDesktopIntegration() error {
-	// Reload Hyprland bindings only when a live Hyprland instance exists.
-	// hyprctl may be installed while the session runs labwc/sway (no
-	// instance), in which case the reload fails and must not abort the rest.
-	if sig := os.Getenv("HYPRLAND_INSTANCE_SIGNATURE"); sig != "" {
-		if hyprctl, err := exec.LookPath("hyprctl"); err == nil {
-			if output, err := exec.Command(hyprctl, "reload").CombinedOutput(); err != nil {
-				return fmt.Errorf("could not reload Hyprland bindings: %w: %s", err, strings.TrimSpace(string(output)))
-			}
-			fmt.Println("  [ok ] Reloaded Hyprland bindings")
-		} else {
-			fmt.Println("  [-- ] Hyprland not found; skipped desktop binding reload")
-		}
-	} else {
-		fmt.Println("  [-- ] No Hyprland session; skipped desktop binding reload")
+	if err := reloadHyprlandBindings(); err != nil {
+		return err
 	}
 
 	if restart, err := exec.LookPath("sumika-restart"); err == nil {
@@ -255,6 +255,24 @@ func repairDesktopIntegration() error {
 		fmt.Println("  [ok ] Restarted Quickshell integration")
 	} else {
 		fmt.Println("  [-- ] Sumika Shell not found; skipped Quickshell restart")
+	}
+	return nil
+}
+
+// reloadHyprlandBindings re-runs the Hyprland config (which regenerates the
+// binds from `sasayaki bindings`) only when a live Hyprland instance exists.
+// hyprctl may be installed while the session runs labwc/sway (no instance),
+// in which case the reload is skipped silently.
+func reloadHyprlandBindings() error {
+	if sig := os.Getenv("HYPRLAND_INSTANCE_SIGNATURE"); sig == "" {
+		return nil
+	}
+	hyprctl, err := exec.LookPath("hyprctl")
+	if err != nil {
+		return nil
+	}
+	if output, err := exec.Command(hyprctl, "reload").CombinedOutput(); err != nil {
+		return fmt.Errorf("could not reload Hyprland bindings: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
 }
@@ -325,6 +343,122 @@ func runBindings(paths config.Paths) {
 	if tb != "" {
 		fmt.Printf("translation\t%s\n", tb)
 	}
+	// Tap bindings for enabled wake keys, emitted as their own kind so the
+	// Sumika bindings generator registers them with release-only semantics
+	// (chords like Ctrl+C stay untouched). A key only wakes on a completed
+	// bare tap: press + release with no other key in between.
+	//   code:66 — physical caps keycode: unswapped caps position, and the
+	//   bottom-left key when ctrl-caps-swap moves the role there. Survives
+	//   XKB keysym remaps such as compose:caps.
+	//   F24 — emitted by keyd overload(control, f24) on the caps position
+	//   while the swap preset is active (hold = Ctrl, tap = F24).
+	//   code:37 — physical left Ctrl keycode. Transparent: chords still
+	//   reach clients; only the bare tap fires the bind.
+	//   code:105 — physical right Ctrl keycode, same semantics.
+	if cfg.WakeKeys.CapsLock {
+		fmt.Printf("voicetap\tcode:66\n")
+		fmt.Printf("voicetap\tF24\n")
+	}
+	if cfg.WakeKeys.LeftCtrl {
+		fmt.Printf("voicetap\tcode:37\n")
+	}
+	if cfg.WakeKeys.RightCtrl {
+		fmt.Printf("voicetap\tcode:105\n")
+	}
+}
+
+// runWake implements `sasayaki wake <key> <on|off|toggle|status>` — the
+// per-key wake matrix behind the voicetap bindings. Mutations persist and
+// refresh the live Hyprland binds (and the keyd overload for the caps
+// position) so the change is effective immediately. `sasayaki capslock …`
+// stays as a compatibility alias for `sasayaki wake capslock …`.
+func runWake(paths config.Paths, key, arg string) int {
+	cfg, err := config.Load(paths)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "sasayaki:", err)
+		return exitError
+	}
+	// `sasayaki wake status` (no key): report every wake key, one per line,
+	// so UIs can fetch the whole matrix with one call. "status" arrives in
+	// the key slot when the user omits the key entirely.
+	if key == "" || key == "status" {
+		for _, k := range []struct {
+			name string
+			on   bool
+		}{{"capslock", cfg.WakeKeys.CapsLock}, {"leftctrl", cfg.WakeKeys.LeftCtrl}, {"rightctrl", cfg.WakeKeys.RightCtrl}} {
+			state := "off"
+			if k.on {
+				state = "on"
+			}
+			fmt.Printf("%s %s\n", k.name, state)
+		}
+		return exitOK
+	}
+	var field *bool
+	keyLabel := key
+	switch key {
+	case "caps", "capslock":
+		field = &cfg.WakeKeys.CapsLock
+		keyLabel = "CapsLock"
+	case "lctrl", "leftctrl":
+		field = &cfg.WakeKeys.LeftCtrl
+		keyLabel = "LeftCtrl"
+	case "rctrl", "rightctrl":
+		field = &cfg.WakeKeys.RightCtrl
+		keyLabel = "RightCtrl"
+	default:
+		fmt.Fprintln(os.Stderr, "sasayaki: unknown wake key:", key,
+			"(use capslock | leftctrl | rightctrl)")
+		return exitUsage
+	}
+	state := func() string {
+		if *field {
+			return "on"
+		}
+		return "off"
+	}
+	switch arg {
+	case "on", "off":
+		*field = arg == "on"
+	case "toggle":
+		*field = !*field
+	default: // status, ""
+		fmt.Println(state())
+		return exitOK
+	}
+	if err := config.Save(paths, cfg); err != nil {
+		fmt.Fprintln(os.Stderr, "sasayaki:", err)
+		return exitError
+	}
+	reloadHyprlandBindings()
+	// The keyd side must be re-rendered too: the ctrl-caps-swap preset
+	// turns the caps position into overload(control, f24) only while the
+	// capslock wake is on. Best-effort — without keyboard-remap the plain
+	// swap stays and the code:66 binding still covers the unswapped case.
+	if keyLabel == "CapsLock" {
+		applyKeyboardRemap()
+	}
+	fmt.Printf("%s wake: %s\n", keyLabel, state())
+	return exitOK
+}
+
+// applyKeyboardRemap re-renders the keyd config so the caps-wake overload
+// appears or disappears immediately. Silently skipped when the Sumika
+// keyboard-remap extension is not installed.
+func applyKeyboardRemap() {
+	dataHome := os.Getenv("XDG_DATA_HOME")
+	if dataHome == "" {
+		dataHome = filepath.Join(os.Getenv("HOME"), ".local", "share")
+	}
+	extDir := os.Getenv("SUMIKA_SHELL_EXTENSIONS_DIR")
+	if extDir == "" {
+		extDir = filepath.Join(dataHome, "sumika-shell", "extensions")
+	}
+	apply := filepath.Join(extDir, "keyboard-remap", "bin", "omarchy-keyboard-apply")
+	if _, err := os.Stat(apply); err != nil {
+		return
+	}
+	_ = exec.Command(apply).Run()
 }
 
 func runStatus(paths config.Paths, asJSON bool) int {
@@ -550,6 +684,9 @@ Usage:
   sasayaki translate-toggle     Record and translate (requires translation enabled)
   sasayaki cancel               Cancel active recording or transcription
   sasayaki bindings             Print Hyprland keybindings for desktop integration
+  sasayaki wake capslock|leftctrl|rightctrl on|off|toggle|status
+                              Voice wake by tapping that key alone (chord-safe;
+                              combinations freely selectable, all may be off)
   sasayaki status [--json]      Show service and readiness state
   sasayaki diagnose [--json]    Full dependency and capability report
   sasayaki models [select|download ID]
@@ -576,6 +713,13 @@ func hasJSONFlag(args []string) bool {
 	asJSON := flags.Bool("json", false, "machine-readable output")
 	_ = flags.Parse(args)
 	return *asJSON
+}
+
+func firstArg(args []string) string {
+	if len(args) > 1 {
+		return args[1]
+	}
+	return ""
 }
 
 func fail(err error) {

@@ -24,8 +24,9 @@ const (
 )
 
 // DefaultVoiceBindings are the Hyprland keybindings that trigger voice
-// input toggle when none are configured.
-var DefaultVoiceBindings = []string{DefaultVoiceBinding, "code:472"}
+// input toggle when none are configured. The old "code:472" entry never
+// fired on any connected keyboard (registered as keycode 0) and is gone.
+var DefaultVoiceBindings = []string{DefaultVoiceBinding}
 
 // SupportedLanguages are the SenseVoice model languages accepted in config.
 var SupportedLanguages = []string{"auto", "zh", "ja", "en", "ko", "yue"}
@@ -77,6 +78,29 @@ type Config struct {
 	// TranslationBinding is the Hyprland keybinding that triggers translated
 	// voice input. Empty means use the default.
 	TranslationBinding string `json:"translation_binding,omitempty"`
+	// WakeKeys selects which keys toggle voice input when tapped alone.
+	// Each entry is independent (any combination may be on) and chord-safe:
+	// a key only wakes on a completed bare tap — press + release with no
+	// other key in between — so chords (Ctrl+C, Ctrl+A, …) keep their
+	// normal meaning. `sasayaki bindings` reports each active key as a
+	// release-only tap binding.
+	WakeKeys WakeKeysConfig `json:"wake_keys"`
+}
+
+// WakeKeysConfig is the per-key wake matrix. Keys are identified by stable
+// evdev keycodes, so wake survives every XKB/keyd keysym remap.
+type WakeKeysConfig struct {
+	// CapsLock taps the key playing the CapsLock role.
+	CapsLock bool `json:"capslock,omitempty"`
+	// LeftCtrl taps the physical left Ctrl key.
+	LeftCtrl bool `json:"leftctrl,omitempty"`
+	// RightCtrl taps the physical right Ctrl key.
+	RightCtrl bool `json:"rightctrl,omitempty"`
+}
+
+// Any reports whether at least one wake key is enabled.
+func (w WakeKeysConfig) Any() bool {
+	return w.CapsLock || w.LeftCtrl || w.RightCtrl
 }
 
 type TranslationConfig struct {
@@ -202,6 +226,18 @@ func Load(p Paths) (Config, error) {
 	}
 	if err := json.Unmarshal(b, &c); err != nil {
 		return c, fmt.Errorf("config %s: %w", p.ConfigFile(), err)
+	}
+	// Legacy pre-wake-matrix config: the single caps_lock_wake bool maps
+	// onto wake_keys.capslock. Detected via the raw payload so a stale
+	// true survives even after later code paths default the struct.
+	var legacy struct {
+		CapsLockWake *bool `json:"caps_lock_wake"`
+		WakeKeys     *WakeKeysConfig `json:"wake_keys"`
+	}
+	if err := json.Unmarshal(b, &legacy); err == nil {
+		if legacy.CapsLockWake != nil && legacy.WakeKeys == nil && *legacy.CapsLockWake {
+			c.WakeKeys.CapsLock = true
+		}
 	}
 	if err := c.Validate(); err != nil {
 		return c, fmt.Errorf("config %s: %w", p.ConfigFile(), err)

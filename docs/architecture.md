@@ -108,3 +108,13 @@ does not change when one is added or removed.
 The default is toggle-to-record, which is reliable for generic command
 shortcuts. A portal push-to-talk binding is a future enhancement where
 `Activated`/`Deactivated` shortcut events are available.
+
+### CapsLock wake
+
+Sasayaki can also be toggled by tapping the CapsLock key. The feature spans
+three cooperating layers — the `caps_lock_wake` config flag, the
+`voicetap` lines of `sasayaki bindings` (consumed by the desktop's binding
+generator), and, when a keyd ctrl↔caps swap is active, a Sumika
+keyboard-remap overload that turns a bare tap of the caps position into
+`F24` while held chords stay real Ctrl. See [wake-keys.md](wake-keys.md)
+for the full matrix and implementation notes.

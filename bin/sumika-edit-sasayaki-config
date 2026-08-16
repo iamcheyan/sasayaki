@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Edit the sasayaki config in a proper terminal via sumika-launch-tui.
+# The bar's execDetached has no TTY, so a TUI editor must never be spawned
+# directly from QML (it dies instantly and the menu looks dead).
+
+config_file="${XDG_CONFIG_HOME:-$HOME/.config}/sasayaki/config.json"
+mkdir -p "$(dirname "$config_file")"
+
+# Resolve the editor: skip placeholder values (CI/lab images set EDITOR=true),
+# then fall back through the usual TUI editors.
+editor=""
+for cand in "${VISUAL:-}" "${EDITOR:-}" nvim vim vi nano; do
+  [[ -z "$cand" ]] && continue
+  case "$cand" in
+    true|false|:|/bin/true|/usr/bin/true) continue ;;
+  esac
+  if command -v "${cand%% *}" >/dev/null 2>&1; then
+    editor="$cand"
+    break
+  fi
+done
+[[ -z "$editor" ]] && editor="vi"
+
+launcher="$(command -v sumika-launch-tui || true)"
+if [[ -z "$launcher" && -n "${SUMIKA_SHELL_ROOT:-}" && -x "${SUMIKA_SHELL_ROOT}/bin/sumika-launch-tui" ]]; then
+  launcher="${SUMIKA_SHELL_ROOT}/bin/sumika-launch-tui"
+fi
+
+if [[ -n "$launcher" ]]; then
+  exec "$launcher" -a io.github.iamcheyan.sumika.editsasayakiconfig "$editor" "$config_file"
+fi
+exec "$editor" "$config_file"

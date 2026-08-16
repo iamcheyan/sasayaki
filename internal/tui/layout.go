@@ -11,6 +11,8 @@ type layout struct {
 	cardWidth int
 	// compact is true for very small terminals that render the reduced view.
 	compact bool
+	// cardHeight is the adaptive outside height of both cards.
+	cardHeight int
 	// totalHeight is the full content height including header and footer.
 	totalHeight int
 }
@@ -35,12 +37,49 @@ func computeLayout(width, height int) layout {
 		l.sideBySide = true
 		l.cardWidth = (maxWidth - 2) / 2
 	}
+	// The cards grow with the settings menu (category headers + items +
+	// blank separators), capped so ordinary terminals are not filled edge to
+	// edge; both cards share the height so left menu and right detail stay
+	// aligned.
+	l.cardHeight = menuBodyHeight() + 4
+	if l.cardHeight > maxCardHeight {
+		l.cardHeight = maxCardHeight
+	}
+	if l.cardHeight < minCardHeight {
+		l.cardHeight = minCardHeight
+	}
 	// three-line header + blank + cards + blank + footer. Stacked cards need a second
 	// card plus its separator, so a short terminal receives the compact but
 	// still actionable screen instead of clipped borders.
-	l.totalHeight = 3 + 1 + cardHeight + 1 + 1
+	chromeHeight := 3 + 1 + 1 + 1 // header + blank + blank + footer
+	l.totalHeight = chromeHeight + l.cardHeight
 	if !l.sideBySide {
-		l.totalHeight += cardHeight + 1
+		l.totalHeight += l.cardHeight + 1
+	}
+	// Shrink the cards (never below minCardHeight) before giving up and
+	// switching to the compact view, so the historical 80×24 guarantee
+	// keeps the full side-by-side dashboard. Stacked mode must fit BOTH
+	// cards plus their separator inside the terminal.
+	fitHeight := height - chromeHeight
+	if l.sideBySide {
+		if l.cardHeight > fitHeight {
+			if fitHeight >= minCardHeight {
+				l.cardHeight = fitHeight
+				l.totalHeight = chromeHeight + l.cardHeight
+			} else {
+				l.compact = true
+			}
+		}
+	} else {
+		stacked := 2*l.cardHeight + 1
+		if stacked > fitHeight {
+			if 2*minCardHeight+1 <= fitHeight {
+				l.cardHeight = (fitHeight - 1) / 2
+				l.totalHeight = chromeHeight + 2*l.cardHeight + 1
+			} else {
+				l.compact = true
+			}
+		}
 	}
 	if maxWidth < 40 || height < l.totalHeight {
 		l.compact = true
@@ -49,6 +88,21 @@ func computeLayout(width, height int) layout {
 }
 
 // cardHeight is the outside height of both cards, equal by construction.
-// Sixteen inner rows match musubi's compact dashboard cards; the remaining
-// two rows are the shared rounded frame.
-const cardHeight = 18
+// menuBodyHeight returns the natural row count of the settings menu body:
+// one row per category header, per item, plus one blank separator after each
+// category (and one trailing row of breathing room).
+func menuBodyHeight() int {
+	rows := 0
+	for _, n := range menuCategoryItems {
+		rows += 1 + n + 1
+	}
+	return rows
+}
+
+// Layout clamps keep small terminals usable and huge ones uncrowded.
+const (
+	minCardHeight = 18 // matches the historical fixed height
+	maxCardHeight = 26
+)
+
+const cardHeight = minCardHeight

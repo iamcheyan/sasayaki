@@ -9,7 +9,7 @@ test:
 	go test ./...
 
 install: build
-	install -Dm755 $(BIN) $(HOME)/.local/bin/$(BIN)
+	ln -sfn $(CURDIR)/$(BIN) $(HOME)/.local/bin/$(BIN)
 
 # Distribution packaging. See packaging/{rpm,deb}/README.md.
 dist/rpm: scripts/build-rpm.sh packaging/rpm/sasayaki.spec

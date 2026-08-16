@@ -155,11 +155,14 @@ desktop, Sasayaki also ships as a QML extension module and registers:
 - **Context menu** — Control Center (TUI), Edit Configuration, Service
   Restart, and Diagnose.
 - **Settings page** — Voice Input page inside Sumika's settings dialog.
-- **Key bindings** — `sasayaki bindings` feeds Hyprland's `bindings.lua`:
-  `ALT + A` / `HANGUL_HANJA` / `0X100811D0` / `XF86Tools` toggle plain
-  voice input (`sasayaki.toggle`); `HANGUL` triggers translated input
-  (`sasayaki.translate-toggle`). Bindings come from Sasayaki's own config
-  (`voice_bindings` / `translation_binding` in `~/.config/sasayaki/config.json`).
+- **Key bindings** — `sasayaki bindings` feeds Hyprland's `bindings.lua`;
+  entries come from Sasayaki's own config (`voice_bindings` /
+  `translation_binding` in `~/.config/sasayaki/config.json`).
+- **CapsLock wake** — enable it (`sasayaki capslock toggle`, the TUI
+  settings menu, or the taskbar context menu) and a bare tap of the
+  CapsLock key toggles voice input in every keyboard state — stock or
+  ctrl↔caps-swapped, any layout. Held chords like `Ctrl+C` are unaffected.
+  See [docs/wake-keys.md](docs/wake-keys.md).
 - **Floating TUI** — the control center opens in a centered floating window
   (1180×760) via Hyprland window rules, matching the other Sumika TUI tools.
 

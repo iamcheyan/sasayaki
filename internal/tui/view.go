@@ -97,7 +97,10 @@ func (m Model) cards() string {
 	leftBody := m.menuCardBody(m.leftCardWidth() - 2)
 	rightTitle, rightBody, totalItems, visibleItems, topItem := m.detailCardContent()
 
-	h := cardHeight
+	h := m.layout.cardHeight
+	if h <= 0 {
+		h = cardHeight
+	}
 
 	left := m.customCardFrame("CATEGORIES", leftBody, m.leftCardWidth(), h, m.activePanel == panelLeft)
 	right := m.customCardFrameWithScroll(rightTitle, rightBody, m.rightCardWidth(), h, totalItems, visibleItems, topItem, m.activePanel == panelRight)
@@ -247,48 +250,10 @@ func (m Model) customCardFrameWithScroll(title, body string, width, targetHeight
 func (m Model) menuCardBody(width int) string {
 	var b strings.Builder
 
-	categories := []struct {
-		name  string
-		items []struct {
-			id    int
-			label string
-		}
-	}{
-		{
-			name: "SPEECH RECOGNITION",
-			items: []struct {
-				id    int
-				label string
-			}{
-				{0, "Local Speech Model"},
-				{1, "Speech Language"},
-				{2, "Model Specs & Storage"},
-			},
-		},
-		{
-			name: "TRANSLATION & LLM",
-			items: []struct {
-				id    int
-				label string
-			}{
-				{3, "Translation Toggle"},
-				{4, "Translation Model"},
-				{5, "Target Language"},
-			},
-		},
-		{
-			name: "SYSTEM & UTILS",
-			items: []struct {
-				id    int
-				label string
-			}{
-				{6, "Global Shortcut Guide"},
-				{7, "Service Control"},
-				{8, "Diagnostics & Logs"},
-			},
-		},
-	}
+	categories := menuCategories()
 
+	// The card height adapts to this list (see menuBodyHeight), so blank
+	// separators between categories are kept and nothing is truncated.
 	for _, cat := range categories {
 		b.WriteString(m.section(cat.name, false))
 		for _, item := range cat.items {
@@ -315,6 +280,53 @@ func (m Model) menuCardBody(width int) string {
 
 	return b.String()
 }
+
+// menuCategory is one settings-menu section. The layout measures this same
+// data to size the cards, so the menu and its frame always agree.
+type menuCategory struct {
+	name  string
+	items []menuItem
+}
+
+type menuItem struct {
+	id    int
+	label string
+}
+
+// menuCategories is the single source of truth for the settings menu.
+func menuCategories() []menuCategory {
+	return []menuCategory{
+		{
+			name: "SPEECH RECOGNITION",
+			items: []menuItem{
+				{0, "Local Speech Model"},
+				{1, "Speech Language"},
+				{2, "Model Specs & Storage"},
+			},
+		},
+		{
+			name: "TRANSLATION & LLM",
+			items: []menuItem{
+				{3, "Translation Toggle"},
+				{4, "Translation Model"},
+				{5, "Target Language"},
+			},
+		},
+		{
+			name: "SYSTEM & UTILS",
+			items: []menuItem{
+				{6, "Global Shortcut Guide"},
+				{7, "Service Control"},
+				{8, "Diagnostics & Logs"},
+				{9, "Voice Wake Keys"},
+			},
+		},
+	}
+}
+
+// menuCategoryItems is the per-category item count used by the layout's
+// menuBodyHeight.
+var menuCategoryItems = []int{3, 3, 4}
 
 // installedBadge renders the per-model install-state pill from the cached
 // snapshot. While the snapshot is still loading (nil) it shows a neutral
@@ -521,8 +533,11 @@ func (m Model) detailCardContent() (string, string, int, int, int) {
 		// card frame reserves one row of breathing room above and below content.
 		// We always emit exactly the available body height so the frame remains
 		// fixed while scrolling.
-		viewLines := cardHeight - 4    // = 14 with cardHeight=18
-		modelsPerPage := viewLines / 2 // = 6
+		viewLines := m.layout.cardHeight - 4
+		if viewLines < 1 {
+			viewLines = cardHeight - 4
+		}
+		modelsPerPage := viewLines / 2
 		if modelsPerPage < 1 {
 			modelsPerPage = 1
 		}
@@ -646,6 +661,53 @@ func (m Model) detailCardContent() (string, string, int, int, int) {
 			b.WriteString("    " + m.theme.base().Foreground(m.theme.muted).Render(act.desc) + "\n\n")
 		}
 
+	case 9:
+		title = "VOICE WAKE KEYS"
+		b.WriteString(m.section("WAKE KEYS (tap alone to toggle voice)", true))
+		rows := []struct {
+			label string
+			on    bool
+		}{
+			{"CapsLock", m.cfg.WakeKeys.CapsLock},
+			{"LeftCtrl", m.cfg.WakeKeys.LeftCtrl},
+			{"RightCtrl", m.cfg.WakeKeys.RightCtrl},
+		}
+		for i, row := range rows {
+			isCursor := (i == m.wakeCursor) && (m.activePanel == panelRight)
+			pointer := "  "
+			if isCursor {
+				pointer = "• "
+			}
+			state := "OFF"
+			stateColor := m.theme.muted
+			if row.on {
+				state = "ON"
+				stateColor = m.theme.focus
+			}
+			style := m.theme.base()
+			if isCursor {
+				style = m.theme.base().Foreground(m.theme.focus).Bold(true)
+			}
+			mark := "["
+			if row.on {
+				mark = "[x"
+			}
+			mark += "]"
+			b.WriteString(pointer + m.theme.base().Foreground(stateColor).Render(mark) + " " +
+				style.Render(fmt.Sprintf("[%d] %s wake", i+1, row.label)) + "  " +
+				m.theme.base().Foreground(stateColor).Render(state) + "\n")
+		}
+		b.WriteString("\n" + m.section("HOW IT WORKS", false))
+		lines := []string{
+			"Any combination may be on; all may be off.",
+			"Binds are keycode-based, so they follow the physical key",
+			"even across keyd swaps and XKB remaps.",
+			"Release-only + transparent: a key only wakes on a bare tap;",
+			"chords like Ctrl+C keep their normal meaning.",
+		}
+		for _, l := range lines {
+			b.WriteString("  " + m.theme.base().Foreground(m.theme.muted).Render(l) + "\n")
+		}
 	case 8:
 		title = "DIAGNOSTICS & SERVICE LOGS"
 		b.WriteString(m.section("DIAGNOSTIC & LOG TOOLS", true))
