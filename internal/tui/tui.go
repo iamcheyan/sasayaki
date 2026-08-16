@@ -838,10 +838,10 @@ func saveCfgCmd(paths config.Paths, mutate func(*config.Config) string) tea.Cmd 
 	}
 }
 
-// toggleCapsWake flips the CapsLock-wake setting, persists it and reloads the
-// Hyprland binds so the voicetap keybind appears/disappears immediately.
+// toggleWakeKeyCmd flips one wake key, persists it and reloads the Hyprland
+// binds so the voicetap keybind appears/disappears immediately.
 // applyKeyboardRemap re-renders the keyd config so the caps-position
-// overload(leftcontrol, f24) follows the wake setting. Best-effort; skipped
+// overload(control, f24) follows the caps wake setting. Best-effort; skipped
 // when the Sumika keyboard-remap extension is absent (plain swap stays).
 func applyKeyboardRemap() {
 	dataHome := os.Getenv("XDG_DATA_HOME")

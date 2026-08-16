@@ -105,11 +105,13 @@ bindsym $mod+Shift+a exec sasayaki translate-toggle
 ### Hyprland
 
 `sumika-action sasayaki.toggle` works only with Sumika; standalone users
-bind the binary directly:
+bind the binary directly. Shortcuts are pure examples — Sasayaki ships no
+default modifier binding (pick keys that do not conflict with your setup;
+`sasayaki translate-toggle` requires translation enabled):
 
 ```text
-bind = ALT, A, exec, sasayaki toggle
-bind = ALT, SHIFT, A, exec, sasayaki translate-toggle
+bind = SUPER, V, exec, sasayaki toggle
+bind = SUPER, SHIFT, V, exec, sasayaki translate-toggle
 ```
 
 ### Focused-window resolution
