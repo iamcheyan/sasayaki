@@ -326,11 +326,10 @@ func runBindings(paths config.Paths) {
 		// Fall back to defaults on config error so keybinds still work.
 		cfg = config.Default()
 	}
-	bindings := cfg.VoiceBindings
-	if len(bindings) == 0 {
-		bindings = config.DefaultVoiceBindings
-	}
-	for _, b := range bindings {
+	// No voice binding by default: ALT+A conflicted with other setups, so
+// users opt in via voice_bindings in config.json (wake keys still emit
+// voicetap lines independently).
+	for _, b := range cfg.VoiceBindings {
 		if strings.TrimSpace(b) == "" {
 			continue
 		}

@@ -19,14 +19,9 @@ const (
 	DefaultShortcutMode       = "toggle"
 	DefaultRetention          = 10 * time.Minute
 	MinRecording              = 300 * time.Millisecond
-	DefaultVoiceBinding       = "ALT + A"
 	DefaultTranslationBinding = "HANGUL"
 )
 
-// DefaultVoiceBindings are the Hyprland keybindings that trigger voice
-// input toggle when none are configured. The old "code:472" entry never
-// fired on any connected keyboard (registered as keycode 0) and is gone.
-var DefaultVoiceBindings = []string{DefaultVoiceBinding}
 
 // SupportedLanguages are the SenseVoice model languages accepted in config.
 var SupportedLanguages = []string{"auto", "zh", "ja", "en", "ko", "yue"}
@@ -71,9 +66,9 @@ type Config struct {
 	// Translation is optional. It targets any OpenAI-compatible chat endpoint
 	// and belongs solely to Sasayaki; it is never read from OpenCode/Sumika.
 	Translation TranslationConfig `json:"translation"`
-	// VoiceBindings are Hyprland keybindings that trigger voice toggle.
-	// Consumed by `sasayaki bindings` for desktop integration; ignored when
-	// running standalone. Empty means use the defaults below.
+	// VoiceBindings are optional Hyprland keybindings that trigger voice
+	// input toggle. Opt-in only (no default — a hard-wired ALT+A conflicted
+	// with other setups); users who want a modifier shortcut set it here.
 	VoiceBindings []string `json:"voice_bindings,omitempty"`
 	// TranslationBinding is the Hyprland keybinding that triggers translated
 	// voice input. Empty means use the default.
@@ -118,7 +113,6 @@ func Default() Config {
 		Language:           DefaultLanguage,
 		ShortcutMode:       DefaultShortcutMode,
 		Retention:          Duration(DefaultRetention),
-		VoiceBindings:      DefaultVoiceBindings,
 		TranslationBinding: DefaultTranslationBinding,
 	}
 }
