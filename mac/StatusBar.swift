@@ -525,7 +525,10 @@ final class VoiceMenu: NSObject {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             let flag = translate ? " --translate" : ""
-            let (out, _) = self.captureStatus("'\(cli)' deliver '\(wav)'\(flag) --json 2>/dev/null")
+            // --no-paste: THIS app owns the pasteboard + Cmd+V (pasteLocally,
+            // via CGEvent). Without it the CLI would also poll + paste,
+            // racing the menubar's own poll → intermittent double-paste.
+            let (out, _) = self.captureStatus("'\(cli)' deliver '\(wav)'\(flag) --no-paste --json 2>/dev/null")
             let obj = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any]
             DispatchQueue.main.async {
                 if obj?["ok"] as? Bool == true {

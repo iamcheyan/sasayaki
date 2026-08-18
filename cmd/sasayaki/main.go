@@ -79,13 +79,16 @@ func main() {
 	case "cancel":
 		fail(runCancel(paths))
 	case "deliver":
-		// sasayaki deliver <wav> [--translate]
+		// sasayaki deliver <wav> [--translate] [--no-paste] [--json]
 		rest := args[1:]
-		wav, translate := "", false
+		wav, translate, noPaste := "", false, false
+		asJSON := hasJSONFlag(rest)
 		for _, a := range rest {
 			switch a {
 			case "--translate":
 				translate = true
+			case "--no-paste":
+				noPaste = true
 			default:
 				if !strings.HasPrefix(a, "--") && wav == "" {
 					wav = a
@@ -93,10 +96,10 @@ func main() {
 			}
 		}
 		if wav == "" {
-			fmt.Fprintln(os.Stderr, "usage: sasayaki deliver <wav> [--translate]")
+			fmt.Fprintln(os.Stderr, "usage: sasayaki deliver <wav> [--translate] [--no-paste]")
 			os.Exit(exitUsage)
 		}
-		fail(runDeliver(paths, wav, translate))
+		fail(runDeliver(paths, wav, translate, noPaste, asJSON))
 	case "bindings":
 		runBindings(paths)
 	case "wake":
@@ -372,7 +375,7 @@ func runCancel(paths config.Paths) error {
 // Cmd+V keystroke from the daemon silently miss, while a terminal child
 // inherits the terminal's GUI session and the menubar app is a GUI process.
 // On linux the daemon pastes itself and deliver returns immediately.
-func runDeliver(paths config.Paths, wav string, translate bool) error {
+func runDeliver(paths config.Paths, wav string, translate, noPaste, asJSON bool) error {
 	abs, err := filepath.Abs(wav)
 	if err != nil {
 		return fmt.Errorf("deliver: %w", err)
@@ -381,13 +384,22 @@ func runDeliver(paths config.Paths, wav string, translate bool) error {
 	if err != nil {
 		return err
 	}
-	if response.Message != "" {
+	if asJSON {
+		_ = json.NewEncoder(os.Stdout).Encode(response)
+	} else if response.Message != "" {
 		fmt.Println(response.Message)
 	}
 	if !response.OK {
 		if response.Error != nil {
 			return fmt.Errorf("%s", response.Error.Detail)
 		}
+		return nil
+	}
+	// --no-paste: the caller (macOS menubar app) owns the pasteboard and
+	// Cmd+V — it polls the service phase itself and pastes via CGEvent.
+	// Returning here avoids a SECOND paste from this process racing the
+	// menubar's own poll (the cause of intermittent double-paste).
+	if noPaste {
 		return nil
 	}
 	if runtime.GOOS != "darwin" {
