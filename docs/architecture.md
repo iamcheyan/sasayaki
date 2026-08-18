@@ -1,7 +1,7 @@
 # Architecture
 
-Sasayaki is a standalone Linux application. It does not read, write, or invoke
-Sumika, Omarchy, or Shirabe files.
+Sasayaki is a standalone application for Linux and macOS. It does not read,
+write, or invoke Sumika, Omarchy, or Shirabe files.
 
 ```text
 desktop shortcut
@@ -38,8 +38,10 @@ through it and exit immediately.
 ### Control protocol
 
 Versioned, newline-delimited JSON over the socket. `status`, `toggle`,
-`cancel` and `diagnose` are handled serially under a mutex; a `diagnose`
-response carries the full `diagnostics.Report` inside the response envelope.
+`cancel`, `deliver` and `diagnose` are handled serially under a mutex; a
+`diagnose` response carries the full `diagnostics.Report` inside the response
+envelope. `deliver` (macOS) accepts an externally finalized WAV from the
+menu-bar app, which owns the microphone grant and records via AVAudioEngine.
 Errors are typed (`code`, `class`, `detail`) so the TUI and CLI can present
 them distinctly. Unknown operations and wrong protocol versions are rejected
 with specific error codes.
@@ -78,6 +80,47 @@ systemctl --user disable --now sasayaki.service
 rm ~/.config/systemd/user/sasayaki.service
 systemctl --user daemon-reload
 ```
+
+## macOS platform
+
+The Go service and protocol are platform-agnostic; macOS adapts three edges
+behind `//go:build darwin` tags:
+
+- **Recording** — the menu-bar app (`mac/StatusBar.swift`, an
+  `LSUIElement` status-item app) records via `AVAudioEngine` and a
+  converter tap that resamples to 16 kHz mono s16le, writing an
+  `AVAudioFile`. This keeps the TCC microphone grant attributed to the app
+  process — `ffmpeg`/`parecord` spawned from the launchd daemon would be
+  attributed to a different binary and silently zero-fill. `ffmpeg`
+  remains as a fallback recorder when the app is not running.
+- **Service lifecycle** — `internal/service/unit_darwin.go` maps the
+  `service start|stop|restart|status` verbs to `launchctl`
+  `bootstrap`/`bootout` against a user LaunchAgent
+  (`~/Library/LaunchAgents/io.github.iamcheyan.sasayaki.plist`). The plist
+  injects the user's `PATH` so Homebrew tools resolve.
+- **Paste** — the launchd daemon has no Aqua session, so daemon-side
+  `pbcopy`/osascript silently miss. Paste is owned by the client: the
+  menu-bar app sets `NSPasteboard` and posts `Cmd+V` via `CGEvent` from its
+  own process (one Accessibility grant). The CLI `deliver --no-paste` flag
+  prevents the CLI from racing the app's paste (the cause of double-paste).
+
+```text
+F13 hotkey (Carbon EventHotKey)
+       │  toggle
+       ▼
+Sasayaki.app (Swift) ── AVAudioEngine ──▶ WAV
+       │  sasayaki deliver <wav> --no-paste --json
+       ▼
+Go daemon (launchd) ── socket ── private Python/SenseVoice ──▶ text
+       │  status poll (phase=succeeded, last_result)
+       ▼
+Sasayaki.app ── NSPasteboard + CGEvent Cmd+V ──▶ focused app
+```
+
+Signing: `mac/sign.sh` creates a fixed self-signed identity
+(`sumika-voice-dev`) so TCC grants (microphone, accessibility) bind to a
+stable designated requirement and survive rebuilds. Ad-hoc signing would
+re-prompt on every rebuild.
 
 ## Desktop input boundary
 

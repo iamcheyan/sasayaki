@@ -1,9 +1,9 @@
 # Sasayaki
 
-Sasayaki is a standalone, Go-based voice input application for Linux. It
-records audio, transcribes it locally with a selectable offline engine, and
-pastes the result into the focused application — with an optional online
-translation step in between.
+Sasayaki is a standalone, Go-based voice input application for Linux and
+macOS. It records audio, transcribes it locally with a selectable offline
+engine, and pastes the result into the focused application — with an
+optional online translation step in between.
 
 It is fully independent of any desktop environment: one binary owns its
 configuration, model runtime, user service, control center (TUI), and
@@ -20,14 +20,19 @@ integration is an add-on; the program works identically without it.
   control center.
 - **Toggle-to-record** — press the hotkey once to start recording, again to
   transcribe and paste into the focused window. Press `Escape` to cancel.
+  On macOS the menu-bar app binds **F13** (dictate) and **F14** (dictate +
+  translate) as global hotkeys; on Linux bind `sasayaki toggle` /
+  `sasayaki translate-toggle` in your desktop's shortcut settings.
 - **Automatic paste** — copies the result to the clipboard and pastes it
-  into the focused window on both Wayland and X11. The paste is
-  window-aware: it resolves the focused window (via `hyprctl` on Hyprland),
-  uses kitty's native remote paste in kitty, sends the chord the app
-  actually binds (`Ctrl+V` for GUI apps, `Shift+Insert`/`Ctrl+Shift+V` for
-  terminals), and reaches XWayland windows through the X11 clipboard
-  (`xsel`) plus `xdotool`. Backends fall back in order: `wtype` →
-  `ydotool` → `hyprctl send_key_state` → `xdotool`.
+  into the focused window. On Linux this is window-aware: it resolves the
+  focused window (via `hyprctl` on Hyprland), uses kitty's native remote
+  paste in kitty, sends the chord the app actually binds (`Ctrl+V` for GUI
+  apps, `Shift+Insert`/`Ctrl+Shift+V` for terminals), and reaches XWayland
+  windows through the X11 clipboard (`xsel`) plus `xdotool`. Backends fall
+  back in order: `wtype` -> `ydotool` -> `hyprctl send_key_state` ->
+  `xdotool`. On macOS the menu-bar app posts `Cmd+V` via CGEvent from its
+  own process (a single Accessibility grant), avoiding the fragile
+  osascript -> System Events chain.
 - **Optional online translation** — after transcription, send the text to any
   OpenAI-compatible endpoint and paste the translated result. Bound to a
   dedicated hotkey; a plain `toggle` never translates.
@@ -40,15 +45,28 @@ integration is an add-on; the program works identically without it.
   own XDG directories; nothing touches an existing Python install.
 - **One binary** — a single `sasayaki` executable (with a private Python
   runtime for sherpa-onnx inference) that works on any Linux with PipeWire or
-  PulseAudio.
+  PulseAudio, and on macOS 11+ via a menu-bar app bundle.
 
 ## What it needs
 
-- Linux with PipeWire/PulseAudio recording support (`parecord`)
+**Linux**
+
+- PipeWire/PulseAudio recording support (`parecord`)
 - Python 3, used privately for the local `sherpa-onnx` inference runtime
 - `wl-copy` and a paste backend (`wtype` is preferred on Wayland; `ydotool`
   or `xdotool` also work); `xsel` extends pasting to XWayland programs
 - systemd user services (for the background recorder/transcriber)
+
+**macOS** (11+)
+
+- The `Sasayaki.app` menu-bar bundle (built by `mac/build.sh`) — holds the
+  TCC microphone grant and records via native `AVAudioEngine`.
+- Python 3 (system Python 3.9+ is fine), used privately for sherpa-onnx.
+- `ffmpeg` (Homebrew) — the fallback recorder when the menu-bar app is not
+  running; the native path needs no extra tools.
+- Accessibility permission for `Sasayaki.app` (System Settings > Privacy &
+  Security > Accessibility) — required for the automatic Cmd+V paste.
+- launchd user agents (built in) for the background daemon.
 
 First-run setup installs Python packages in Sasayaki's own data directory and
 downloads the selected offline model. It does not modify an existing Python
@@ -81,6 +99,44 @@ shortcut setup, Wayland/X11 paste notes, and headless usage.
 automatically) lives in [packaging/rpm](packaging/rpm/README.md) and
 [packaging/deb](packaging/deb/README.md); build with `make dist/rpm` /
 `make dist/deb`.
+
+## Quick start (macOS)
+
+On macOS the menu-bar app (`Sasayaki.app`) is the primary interface: it owns
+the microphone permission, records via native `AVAudioEngine`, and pastes via
+`Cmd+V` (CGEvent). The Go daemon runs as a launchd user agent and does the
+transcription.
+
+```sh
+# 1. Build the app bundle (Go binary + Swift menu-bar app, signed with a
+#    stable self-signed identity so TCC grants survive rebuilds):
+sh mac/build.sh
+
+# 2. First-run setup — installs the private Python runtime + model, and
+#    installs the launchd agent:
+dist/Sasayaki.app/Contents/MacOS/sasayaki setup
+
+# 3. Launch the menu-bar app:
+open dist/Sasayaki.app
+```
+
+On first launch macOS will prompt for two permissions — grant both:
+
+- **Microphone** — the app records audio via `AVAudioEngine`. Without it the
+  recorder produces an empty file.
+- **Accessibility** (System Settings > Privacy & Security > Accessibility) —
+  required for the automatic `Cmd+V` paste. The app prompts once on launch;
+  enable `Sasayaki` in the list. If you rebuilt the app and paste stops
+  working, toggle the switch off and on once to refresh the grant.
+
+Then press **F13** once to start recording, again to stop and transcribe —
+the result is pasted into whatever window has focus. **F14** records and
+translates. The menu-bar icon shows state (idle/recording/transcribing).
+
+> The signing identity (`sumika-voice-dev`) is created automatically by
+> `mac/sign.sh` on first build. TCC grants bind to the code signature, so a
+> fixed identity means you grant once and rebuild freely. Ad-hoc signing
+> would invalidate the grants on every rebuild.
 
 ## Commands
 
@@ -191,6 +247,10 @@ full transcript logging, set `verbose_transcripts` in
 | Korean text looks over-spaced | Known SenseVoice limitation; text content is correct |
 | Nothing is pasted but clipboard was set | Paste backends unavailable (needs `wtype`/`ydotool`/`xdotool`); the failure state says so |
 | Translation hotkey records but does not translate | `translation.enabled` is false in `~/.config/sasayaki/config.json`; enable it in the control center |
+| macOS: F13 does nothing, no recording starts | Grant Microphone to `Sasayaki.app` (System Settings > Privacy & Security > Microphone) |
+| macOS: transcribes but text is not pasted | Grant Accessibility to `Sasayaki.app`; if already granted, toggle it off/on once after a rebuild |
+| macOS: text is pasted twice | Rebuild the app (`sh mac/build.sh`) — the CLI no longer pastes when the menubar app owns the paste |
+| macOS: `service is not running` | `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.github.iamcheyan.sasayaki.plist`, or re-run `sasayaki setup` |
 
 ## Removing
 
@@ -205,6 +265,14 @@ This removes the config, model, private runtime and recordings. If installed
 as a Sumika extension, also remove the extension directory and drop
 `sasayaki` from the module list.
 
+**macOS**:
+
+```sh
+launchctl bootout gui/$(id -u)/io.github.iamcheyan.sasayaki 2>/dev/null
+rm ~/Library/LaunchAgents/io.github.iamcheyan.sasayaki.plist
+rm -rf ~/.config/sasayaki ~/.local/share/sasayaki ~/.local/state/sasayaki
+```
+
 ## Files
 
 All application data is owned by Sasayaki:
@@ -214,8 +282,13 @@ All application data is owned by Sasayaki:
 ~/.local/share/sasayaki/models/sensevoice/     downloaded model
 ~/.local/share/sasayaki/runtime/venv/          private Python environment
 ~/.local/state/sasayaki/                       recordings and logs
-~/.config/systemd/user/sasayaki.service        user service
-$XDG_RUNTIME_DIR/sasayaki/sasayaki.sock        control socket
+~/.config/systemd/user/sasayaki.service        user service (Linux)
+$XDG_RUNTIME_DIR/sasayaki/sasayaki.sock        control socket (Linux)
+
+# macOS
+~/Library/LaunchAgents/io.github.iamcheyan.sasayaki.plist   launchd agent
+~/Library/Caches/sasayaki/sasayaki.sock                     control socket
+dist/Sasayaki.app                                           menu-bar app bundle
 ```
 
 ## Development
@@ -224,6 +297,12 @@ $XDG_RUNTIME_DIR/sasayaki/sasayaki.sock        control socket
 go test ./...
 go run ./cmd/sasayaki
 ```
+
+macOS-specific code lives under `mac/` (the Swift menu-bar app) and behind
+`//go:build darwin` tags in `internal/` (paste, recording, service unit,
+setup, diagnostics). Build the macOS app bundle with `sh mac/build.sh`;
+Linux builds are unaffected by the darwin-only files. Cross-check both
+platforms with `GOOS=linux go build ./...` from macOS.
 
 The visual language is documented in
 [docs/tui-design-language.md](docs/tui-design-language.md).
