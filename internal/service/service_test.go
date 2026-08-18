@@ -212,6 +212,73 @@ func TestToggleHappyPath(t *testing.T) {
 	}
 }
 
+// --- deliver (macOS menubar app hands over a finished WAV) ---
+
+func writeWav(t *testing.T, path string, size int) {
+	t.Helper()
+	data := make([]byte, size)
+	for i := range data {
+		data[i] = byte(i)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDeliverRunsPipelineAndPastes(t *testing.T) {
+	paths := testPaths(t)
+	d, _, _, pa := testDaemon(t, paths)
+	wav := filepath.Join(t.TempDir(), "delivered.wav")
+	writeWav(t, wav, 4096)
+
+	msg, perr := d.Deliver(wav, false)
+	if perr != nil {
+		t.Fatalf("deliver: %v", perr)
+	}
+	if !strings.Contains(msg, "transcribing") {
+		t.Fatalf("deliver message = %q", msg)
+	}
+	// The service took ownership: the source file is consumed.
+	if _, err := os.Stat(wav); !os.IsNotExist(err) {
+		t.Fatalf("source wav still exists: %v", err)
+	}
+	waitFor(t, "succeeded phase", func() bool { return d.State().Phase == protocol.PhaseSucceeded })
+	if got := pa.pastedTexts(); len(got) != 1 || got[0] != "hello world" {
+		t.Fatalf("paste texts = %v", got)
+	}
+	// The delivered clip lives in the recordings dir (retention owns it).
+	if len(recordingFiles(t, paths)) != 1 {
+		t.Fatalf("recordings = %v, want the delivered clip", recordingFiles(t, paths))
+	}
+}
+
+func TestDeliverRejectsMissingOrEmptyWav(t *testing.T) {
+	paths := testPaths(t)
+	d, _, _, _ := testDaemon(t, paths)
+
+	if _, perr := d.Deliver(filepath.Join(t.TempDir(), "nope.wav"), false); perr == nil {
+		t.Fatal("missing wav accepted")
+	}
+	tiny := filepath.Join(t.TempDir(), "tiny.wav")
+	writeWav(t, tiny, 16)
+	if _, perr := d.Deliver(tiny, false); perr == nil {
+		t.Fatal("empty wav accepted")
+	}
+}
+
+func TestDeliverWhileRecordingRejected(t *testing.T) {
+	paths := testPaths(t)
+	d, _, _, _ := testDaemon(t, paths)
+	if _, perr := d.Toggle(); perr != nil {
+		t.Fatalf("start recording: %v", perr)
+	}
+	wav := filepath.Join(t.TempDir(), "d.wav")
+	writeWav(t, wav, 4096)
+	if _, perr := d.Deliver(wav, false); perr == nil {
+		t.Fatal("deliver during recording accepted")
+	}
+}
+
 func TestDiagnoseUsesOneResponse(t *testing.T) {
 	paths := testPaths(t)
 	d, _, _, _ := testDaemon(t, paths)

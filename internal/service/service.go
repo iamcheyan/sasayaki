@@ -430,6 +430,72 @@ func (d *Daemon) toggle(test, speechOnly, translate bool) (string, *protocol.Err
 	}
 }
 
+// Deliver transcribes a recording that was captured outside the service
+// and runs the same transcribe → (translate) → paste pipeline a finished
+// toggle uses. On macOS the menubar app owns the microphone because TCC
+// grants follow the recording process, so it records with AVAudioEngine
+// and ships the finalized WAV here; the service never records for a
+// deliver.
+func (d *Daemon) Deliver(wavPath string, translate bool) (string, *protocol.Error) {
+	d.opMu.Lock()
+	defer d.opMu.Unlock()
+
+	switch d.phase {
+	case protocol.PhaseIdle, protocol.PhaseSucceeded, protocol.PhaseFailed:
+	default:
+		return "", protocol.NewError(protocol.ErrStillTranscribing, protocol.ClassUser,
+			"Still transcribing the previous clip; wait a moment and try again")
+	}
+	info, err := os.Stat(wavPath)
+	if err != nil || info.Size() < 1024 {
+		return "", protocol.NewError(protocol.ErrTooShort, protocol.ClassUser,
+			"delivered recording is missing or empty")
+	}
+	// Take ownership through the recordings directory so retention cleanup
+	// applies to delivered clips exactly like service-recorded ones.
+	if err := os.MkdirAll(d.paths.RecordingsDir(), 0o700); err != nil {
+		return "", protocol.NewError(protocol.ErrInternal, protocol.ClassService,
+			"could not accept the delivered recording: "+err.Error())
+	}
+	dest := filepath.Join(d.paths.RecordingsDir(), fmt.Sprintf("%d.wav", time.Now().UnixNano()))
+	if err := os.Rename(wavPath, dest); err != nil {
+		if err := copyFile(wavPath, dest); err != nil {
+			return "", protocol.NewError(protocol.ErrInternal, protocol.ClassService,
+				"could not accept the delivered recording: "+err.Error())
+		}
+	}
+	d.testMode = false
+	d.testSpeechOnly = false
+	d.opTranslate = translate
+	d.stateMu.Lock()
+	d.generation++
+	d.recordingGeneration = d.generation
+	d.stateMu.Unlock()
+	generation := d.recordingGeneration
+	d.log.Info("delivered recording accepted — transcribing…", "bytes", info.Size())
+	go d.runTranscription(dest, generation, true)
+	return "Delivered — transcribing…", nil
+}
+
+// copyFile is the cross-device fallback for Deliver when the source WAV
+// lives on another volume than the recordings directory.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Sync()
+}
+
 // Cancel aborts a recording or in-flight transcription.
 func (d *Daemon) Cancel() (string, *protocol.Error) {
 	d.opMu.Lock()
@@ -771,6 +837,9 @@ func (d *Daemon) handle(conn net.Conn) {
 	switch req.Operation {
 	case protocol.OpStatus:
 		d.respond(conn, true, "", nil, d.State())
+	case protocol.OpDeliver:
+		message, perr := d.Deliver(req.Wav, req.Translate)
+		d.respond(conn, perr == nil, message, perr, d.State())
 	case protocol.OpToggle:
 		message, perr := d.Toggle()
 		d.respond(conn, perr == nil, message, perr, d.State())
@@ -829,6 +898,28 @@ func RequestWithTimeout(paths config.Paths, operation string, timeout time.Durat
 	_ = conn.SetDeadline(time.Now().Add(timeout))
 	encoder := json.NewEncoder(conn)
 	if err := encoder.Encode(protocol.Request{Version: protocol.Version, Operation: operation}); err != nil {
+		return protocol.Response{}, err
+	}
+	reader := bufio.NewReader(conn)
+	var response protocol.Response
+	if err := json.NewDecoder(reader).Decode(&response); err != nil {
+		return protocol.Response{}, err
+	}
+	return response, nil
+}
+
+// RequestDeliver ships a finalized WAV to the service for the transcribe →
+// (translate) → paste pipeline. Used by the macOS menubar app, which owns
+// the microphone, and by `sasayaki deliver`.
+func RequestDeliver(paths config.Paths, wav string, translate bool, timeout time.Duration) (protocol.Response, error) {
+	conn, err := net.DialTimeout("unix", paths.Socket(), timeout)
+	if err != nil {
+		return protocol.Response{}, fmt.Errorf("service is not running (no socket at %s); run `sasayaki service start` or `sasayaki setup`", paths.Socket())
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+	req := protocol.Request{Version: protocol.Version, Operation: protocol.OpDeliver, Wav: wav, Translate: translate}
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
 		return protocol.Response{}, err
 	}
 	reader := bufio.NewReader(conn)

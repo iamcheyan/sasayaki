@@ -8,13 +8,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/mattn/go-isatty"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
-
-	"github.com/mattn/go-isatty"
+	"time"
 
 	"github.com/iamcheyan/sasayaki/internal/config"
 	"github.com/iamcheyan/sasayaki/internal/diagnostics"
@@ -76,6 +77,25 @@ func main() {
 		fail(runTranslateToggle(paths))
 	case "cancel":
 		fail(runCancel(paths))
+	case "deliver":
+		// sasayaki deliver <wav> [--translate]
+		rest := args[1:]
+		wav, translate := "", false
+		for _, a := range rest {
+			switch a {
+			case "--translate":
+				translate = true
+			default:
+				if !strings.HasPrefix(a, "--") && wav == "" {
+					wav = a
+				}
+			}
+		}
+		if wav == "" {
+			fmt.Fprintln(os.Stderr, "usage: sasayaki deliver <wav> [--translate]")
+			os.Exit(exitUsage)
+		}
+		fail(runDeliver(paths, wav, translate))
 	case "bindings":
 		runBindings(paths)
 	case "wake":
@@ -120,6 +140,9 @@ func main() {
 // not a TTY. It tries $TERMINAL, xdg-terminal-exec, then common emulators.
 // This keeps the control center usable on any desktop without Sumika.
 func launchInTerminal(bin string) error {
+	if runtime.GOOS == "darwin" {
+		return launchInTerminalDarwin(bin)
+	}
 	if os.Getenv("WAYLAND_DISPLAY") == "" && os.Getenv("DISPLAY") == "" {
 		return errors.New("no display and no terminal; run sasayaki from a terminal")
 	}
@@ -152,6 +175,22 @@ func launchInTerminal(bin string) error {
 		}
 	}
 	return errors.New("no terminal emulator found; run sasayaki from a terminal")
+}
+
+// launchInTerminalDarwin opens the TUI in a macOS terminal emulator.
+// kitty's macOS build rejects the X11-only --class/--name flags, so the
+// app-id identity is carried via --title instead; Terminal.app is the
+// always-present fallback. $TERMINAL still wins when set.
+func launchInTerminalDarwin(bin string) error {
+	if t := os.Getenv("TERMINAL"); t != "" {
+		if args, ok := terminalArgs(t, bin); ok {
+			return startDetached(t, args)
+		}
+	}
+	if p, err := exec.LookPath("kitty"); err == nil {
+		return startDetached(p, []string{"--title", "io.github.iamcheyan.sasayaki", bin})
+	}
+	return startDetached("/usr/bin/open", []string{"-a", "Terminal", bin})
 }
 
 // terminalArgs returns the argv that makes terminal t run bin, and whether t
@@ -226,8 +265,17 @@ func runRepair(paths config.Paths) error {
 	if err := runSetup(paths); err != nil {
 		return err
 	}
-	if err := repairDesktopIntegration(); err != nil {
-		return err
+	if runtime.GOOS != "darwin" {
+		if err := repairDesktopIntegration(); err != nil {
+			return err
+		}
+	}
+	// On darwin the desktop integration is the menubar app (Sumika/Quickshell
+	// do not exist); repair reports the pieces a script can neither read nor
+	// grant instead of failing on them.
+	if runtime.GOOS == "darwin" {
+		fmt.Println("  [-- ] macOS: microphone and Accessibility live in System Settings › Privacy & Security;")
+		fmt.Println("        grant them to the Sasayaki menubar app (the app re-checks on Repair).")
 	}
 	report := diagnostics.All(paths)
 	for _, check := range report.Checks {
@@ -316,6 +364,27 @@ func runCancel(paths config.Paths) error {
 	return nil
 }
 
+// runDeliver hands an externally finalized WAV (recorded by the macOS
+// menubar app, which owns the microphone) to the service for the transcribe
+// → (translate) → paste pipeline.
+func runDeliver(paths config.Paths, wav string, translate bool) error {
+	abs, err := filepath.Abs(wav)
+	if err != nil {
+		return fmt.Errorf("deliver: %w", err)
+	}
+	response, err := service.RequestDeliver(paths, abs, translate, 5*time.Second)
+	if err != nil {
+		return err
+	}
+	if response.Message != "" {
+		fmt.Println(response.Message)
+	}
+	if !response.OK && response.Error != nil {
+		return fmt.Errorf("%s", response.Error.Detail)
+	}
+	return nil
+}
+
 // runBindings prints the configured Hyprland keybindings in the
 // tab-delimited "kind<TAB>binding" format consumed by the Sumika Shell
 // Hyprland bindings generator. Voice bindings trigger sasayaki.toggle;
@@ -327,8 +396,8 @@ func runBindings(paths config.Paths) {
 		cfg = config.Default()
 	}
 	// No voice binding by default: ALT+A conflicted with other setups, so
-// users opt in via voice_bindings in config.json (wake keys still emit
-// voicetap lines independently).
+	// users opt in via voice_bindings in config.json (wake keys still emit
+	// voicetap lines independently).
 	for _, b := range cfg.VoiceBindings {
 		if strings.TrimSpace(b) == "" {
 			continue

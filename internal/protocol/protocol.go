@@ -16,7 +16,13 @@ const (
 	OpTestSpeech      = "test-speech"
 	OpTestTranslation = "test-translation"
 	OpCancel          = "cancel"
-	OpDiagnose        = "diagnose"
+	// OpDeliver transcribes an already-finalized recording produced outside
+	// the service. On macOS the menubar app owns the microphone (TCC grants
+	// follow the process that records), so it captures with AVAudioEngine
+	// and hands the finished WAV to the service through this operation; the
+	// service never records for a deliver.
+	OpDeliver  = "deliver"
+	OpDiagnose = "diagnose"
 )
 
 // Service states reported in State.Service.
@@ -60,10 +66,18 @@ const (
 	ClassService ErrorClass = "service"
 )
 
-// Request is a client → service message.
+// Request is a client → service message. The payload fields serve the
+// deliver operation; they are optional and additive, so a version-1 peer
+// that does not know them simply ignores them (encoding/json drops
+// unknown fields) — the wire version stays 1.
 type Request struct {
 	Version   int    `json:"version"`
 	Operation string `json:"operation"`
+	// Wav is an absolute path to a finalized 16 kHz mono s16 WAV for
+	// OpDeliver. Empty for every other operation.
+	Wav string `json:"wav,omitempty"`
+	// Translate asks OpDeliver to run the translation step before pasting.
+	Translate bool `json:"translate,omitempty"`
 }
 
 // Error is a typed service error carried in a Response.
