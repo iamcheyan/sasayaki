@@ -432,14 +432,29 @@ final class VoiceMenu: NSObject {
     /// Put text on the system pasteboard and inject Cmd+V into the
     /// frontmost app. NSPasteboard talks to the pasteboard server directly
     /// from this GUI process — the path the launchd service cannot take.
-    /// The keystroke needs this app's Accessibility grant.
+    /// Cmd+V is posted via CGEvent from THIS process (not osascript): the
+    /// synthetic event is attributed to the menubar app, so a single
+    /// Accessibility grant suffices. osascript's keystroke is attributed
+    /// to osascript itself, which macOS denies by default (-1002) even
+    /// when this app is trusted — the Apple-Events→System-Events chain is
+    /// the fragile path that silently no-ops.
     private func pasteLocally(_ text: String) {
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(text, forType: .string)
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            _ = self?.capture("osascript -e 'tell application \"System Events\" to keystroke \"v\" using command down' 2>/dev/null")
+        // VirtualKey: 0x09 = V, 0x37 = left Command. Post a full
+        // down→up pair with the command flag set; some apps require the
+        // modifier key itself to be held, so drive Cmd explicitly.
+        guard let src = CGEventSource(stateID: .hidSystemState) else { return }
+        let post: (CGKeyCode, Bool, CGEventFlags?) -> Void = { key, down, flags in
+            guard let ev = CGEvent(keyboardEventSource: src, virtualKey: key, keyDown: down) else { return }
+            if let flags = flags { ev.flags = flags }
+            ev.post(tap: .cgSessionEventTap)
         }
+        post(0x37, true, nil)                       // Cmd down
+        post(0x09, true, .maskCommand)              // V down
+        post(0x09, false, .maskCommand)             // V up
+        post(0x37, false, nil)                      // Cmd up
     }
 
     /// Display a terminal phase (succeeded/failed) once, then fall back to
