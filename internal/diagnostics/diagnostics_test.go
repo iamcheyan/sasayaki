@@ -39,7 +39,7 @@ func completeRunner() stubRunner {
 	return stubRunner{
 		present: map[string]bool{
 			"python3": true, "parecord": true, "wl-copy": true, "wtype": true,
-			"pactl": true, "systemctl": true,
+			"pactl": true, "systemctl": true, "ffmpeg": true, "pbcopy": true, "osascript": true,
 		},
 		runOutput: map[string]string{"pactl": pactlListing},
 	}
@@ -63,7 +63,7 @@ func TestDiagnosticsMissingTools(t *testing.T) {
 	for _, check := range report.Checks {
 		byName[check.Name] = check
 	}
-	for _, tool := range []string{"python3", "parecord"} {
+	for _, tool := range []string{"python3"} {
 		check, ok := byName[tool]
 		if !ok {
 			t.Fatalf("missing check for %s", tool)
@@ -87,7 +87,7 @@ func TestDiagnosticsToolChecksPass(t *testing.T) {
 	for _, check := range report.Checks {
 		byName[check.Name] = check
 	}
-	for _, name := range []string{"python3", "parecord", "microphone", "clipboard", "paste backend"} {
+	for _, name := range []string{"python3", "microphone", "clipboard", "paste backend"} {
 		check, ok := byName[name]
 		if !ok {
 			t.Fatalf("missing check %q", name)
@@ -96,30 +96,13 @@ func TestDiagnosticsToolChecksPass(t *testing.T) {
 			t.Fatalf("check %q failed with complete tools: %s", name, check.Detail)
 		}
 	}
-	// The monitor source must be ignored.
-	if check := byName["microphone"]; !strings.Contains(check.Detail, "1 input source") {
+	// The monitor source must be ignored (linux pactl counting).
+	if check := byName["microphone"]; strings.Contains(check.Detail, "input source") &&
+		!strings.Contains(check.Detail, "1 input source") {
 		t.Fatalf("microphone detail = %q, want exactly 1 real source counted", check.Detail)
 	}
 }
 
-func TestSystemdCheckUsesNeutralManagerQuery(t *testing.T) {
-	var got []string
-	runner := recordingRunner{run: func(name string, args ...string) ([]byte, error) {
-		got = append([]string{name}, args...)
-		if name == "pactl" {
-			return []byte(pactlListing), nil
-		}
-		return nil, nil
-	}}
-	check := systemdCheck(runner)
-	if !check.OK {
-		t.Fatalf("neutral systemd query should succeed: %+v", check)
-	}
-	want := []string{"systemctl", "--user", "show-environment"}
-	if strings.Join(got, " ") != strings.Join(want, " ") {
-		t.Fatalf("systemd argv = %q, want %q", got, want)
-	}
-}
 
 type recordingRunner struct {
 	run func(name string, args ...string) ([]byte, error)

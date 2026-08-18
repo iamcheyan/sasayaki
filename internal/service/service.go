@@ -145,7 +145,7 @@ func newDaemon(paths config.Paths, cfg config.Config, log *slog.Logger) *Daemon 
 		newRecorder: func() recording.Recorder { return recording.NewDefault() },
 		transcriber: nil, // set by New or by the test
 		paster:      pastePaster{},
-		micOK:       func() bool { _, err := exec.LookPath("parecord"); return err == nil },
+		micOK:       micAvailable,
 		phase:       protocol.PhaseIdle,
 		done:        make(chan struct{}),
 	}
@@ -521,7 +521,7 @@ func (d *Daemon) Cancel() (string, *protocol.Error) {
 func (d *Daemon) startRecording() (string, *protocol.Error) {
 	if !d.micOK() {
 		return "", protocol.NewError(protocol.ErrNotReady, protocol.ClassService,
-			"parecord is not installed; install pulseaudio-utils and re-run sasayaki setup")
+			micHint)
 	}
 	path := filepath.Join(d.paths.RecordingsDir(), fmt.Sprintf("%d.wav", time.Now().UnixNano()))
 	rec := d.newRecorder()

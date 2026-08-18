@@ -41,8 +41,7 @@ func TestSystemctlTranslatesStartVerbs(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	gui := fmt.Sprintf("gui/%d", os.Getuid())
 	plist := config.NewPaths().ServiceFile()
-	target := gui + "/" + config.LaunchAgentLabel
-	want := []string{"bootstrap " + gui + " " + plist, "kickstart -k " + target}
+	want := []string{"bootstrap " + gui + " " + plist}
 
 	for _, verbs := range [][]string{
 		{"enable", "--now", "sasayaki.service"},
@@ -60,18 +59,32 @@ func TestSystemctlTranslatesStartVerbs(t *testing.T) {
 }
 
 func TestSystemctlToleratesAlreadyBootstrappedAgent(t *testing.T) {
+	bootstraps := 0
 	calls := stubLaunchctl(t, func(args []string) error {
 		if args[0] == "bootstrap" {
-			// launchd's reply for an agent that is already loaded.
-			return errors.New("Bootstrap failed: 5: Input/output error")
+			bootstraps++
+			if bootstraps == 1 {
+				// launchd's reply for an agent that is already loaded; the
+				// bootout + retry cycle below then succeeds.
+				return errors.New("Bootstrap failed: 5: Input/output error")
+			}
 		}
 		return nil
 	})
 	if err := Systemctl("restart", "sasayaki.service"); err != nil {
 		t.Fatalf("restarting an already-bootstrapped agent must not fail: %v", err)
 	}
-	if len(*calls) != 2 || (*calls)[1][0] != "kickstart" {
-		t.Fatalf("restart must fall through to kickstart: %v", joined(*calls))
+	// Already loaded: the agent is cycled (bootout + bootstrap) so the
+	// CURRENT plist is read, then kickstarted.
+	gui := fmt.Sprintf("gui/%d", os.Getuid())
+	plist := config.NewPaths().ServiceFile()
+	want := []string{
+		"bootstrap " + gui + " " + plist,
+		"bootout " + gui + "/" + config.LaunchAgentLabel,
+		"bootstrap " + gui + " " + plist,
+	}
+	if got := joined(*calls); !slices.Equal(got, want) {
+		t.Fatalf("restart must cycle the agent: %v", got)
 	}
 }
 

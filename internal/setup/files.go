@@ -13,8 +13,12 @@ import (
 // PinnedRuntime is the exact package set installed into Sasayaki's private
 // virtualenv. Versions are fixed so a setup run is reproducible; bump them
 // deliberately with a documented reason.
-const PinnedRuntime = `numpy==2.5.1
-sherpa-onnx==1.13.4
+//
+// numpy 2.0.2 + sherpa-onnx 1.13.5: the newest pair that still supports
+// Python 3.9, which is the system python on stock macOS (setup builds the
+// venv from whatever `python3` resolves to). numpy >= 2.1 needs >= 3.10.
+const PinnedRuntime = `numpy==2.0.2
+sherpa-onnx==1.13.5
 `
 
 // writeRequirements installs the pinned requirement file.

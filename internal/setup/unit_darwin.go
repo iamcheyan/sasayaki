@@ -26,6 +26,14 @@ const plistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 		<string>%s</string>
 		<string>serve</string>
 	</array>
+	<!-- launchd agents get the bare system PATH (/usr/bin:...); homebrew
+	     tools (ffmpeg for recording, kitty for the TUI) live outside it,
+	     so carry the installing user's PATH through. -->
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>%s</string>
+	</dict>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>
@@ -52,7 +60,13 @@ func writeUnit(p config.Paths, binary string) error {
 	if err := os.MkdirAll(filepath.Dir(p.LogOutPath()), 0o700); err != nil {
 		return err
 	}
-	plist := fmt.Sprintf(plistTemplate, config.LaunchAgentLabel, binary, p.LogOutPath(), p.LogErrPath())
+	// launchd agents otherwise see only the bare system PATH; carry the
+	// installing user's PATH so homebrew tools (ffmpeg, kitty) resolve.
+	agentPath := os.Getenv("PATH")
+	if agentPath == "" {
+		agentPath = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
+	}
+	plist := fmt.Sprintf(plistTemplate, config.LaunchAgentLabel, binary, agentPath, p.LogOutPath(), p.LogErrPath())
 	return os.WriteFile(p.ServiceFile(), []byte(plist), 0o600)
 }
 

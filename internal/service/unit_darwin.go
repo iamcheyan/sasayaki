@@ -29,17 +29,36 @@ var launchctl = func(args ...string) error {
 	return nil
 }
 
-// loadAgent bootstraps the LaunchAgent and then (re)starts it. Bootstrapping
-// an already-loaded agent is launchd's way of saying the agent is fine, so a
-// bootstrap failure is only surfaced when the kickstart that follows fails
-// too; kickstart -k starts a stopped agent and restarts a running one.
+// loadAgent (re)loads the LaunchAgent and starts it. launchd only reads the
+// plist at bootstrap time: kickstart -k restarts the process but keeps the
+// OLD environment, so a rewritten plist (new binary, new PATH) is never
+// picked up. Reload therefore boots an already-loaded agent out so the
+// fresh plist is the one that lands. RunAtLoad starts the process; the
+// trailing kickstart is deliberately NOT issued — it would SIGTERM the
+// freshly-booted agent (the -15 exit codes observed in launchctl list) for
+// no benefit.
 func loadAgent() error {
-	bootErr := launchctl("bootstrap", guiDomain(), config.NewPaths().ServiceFile())
-	if err := launchctl("kickstart", "-k", agentTarget()); err != nil {
-		if bootErr != nil {
-			return fmt.Errorf("%w; %v", err, bootErr)
+	plist := config.NewPaths().ServiceFile()
+	gui := guiDomain()
+	if err := launchctl("bootstrap", gui, plist); err != nil {
+		// "Bootstrap failed: 5: Input/output error" is launchd's
+		// already-loaded reply. Cycle the agent so the CURRENT plist is
+		// read. launchd deregisters the bootout asynchronously, so the
+		// immediate re-bootstrap races with it; retry briefly. A bootout
+		// failing because nothing is loaded is fine — the retried
+		// bootstrap failure is what the caller sees.
+		_ = launchctl("bootout", agentTarget())
+		var lastErr error
+		for range 5 {
+			time.Sleep(200 * time.Millisecond)
+			lastErr = launchctl("bootstrap", gui, plist)
+			if lastErr == nil {
+				break
+			}
 		}
-		return err
+		if lastErr != nil {
+			return lastErr
+		}
 	}
 	return nil
 }
