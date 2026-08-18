@@ -63,7 +63,10 @@ final class Recorder: NSObject {
         guard !running else { return true }
         let input = engine.inputNode
         let inFormat = input.inputFormat(forBus: 0)
-        guard inFormat.sampleRate > 0, inFormat.channelCount > 0 else { return false }
+        guard inFormat.sampleRate > 0, inFormat.channelCount > 0 else {
+            try? "\(Date()) bad input format: \(inFormat)".write(toFile: NSHomeDirectory() + "/.cache/sasayaki/mic-debug.log", atomically: true, encoding: .utf8)
+            return false
+        }
 
         // Convert in the tap to deinterleaved float32 @16k/mono — exactly the
         // AVAudioFile processing format. The FILE settings (Int16 PCM below)
@@ -129,6 +132,7 @@ final class Recorder: NSObject {
             tmpURL = nil
             converter = nil
             dstFormat = nil
+            try? "\(Date()) engine.start failed: \(error)".write(toFile: NSHomeDirectory() + "/.cache/sasayaki/mic-debug.log", atomically: true, encoding: .utf8)
             return false
         }
     }
