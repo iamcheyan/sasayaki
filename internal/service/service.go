@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -575,7 +576,7 @@ func (d *Daemon) finishRecording() (string, *protocol.Error) {
 // the final phase. Test recordings (paste=false) stop after transcription:
 // the result is exposed for the test overlay and nothing is pasted. It must
 // be called with d.opMu released.
-func (d *Daemon) runTranscription(path string, generation uint64, paste bool) {
+func (d *Daemon) runTranscription(path string, generation uint64, doPaste bool) {
 	d.opMu.Lock()
 	if !d.currentOperation(generation) {
 		d.opMu.Unlock()
@@ -641,7 +642,7 @@ func (d *Daemon) runTranscription(path string, generation uint64, paste bool) {
 		translated, err := translate.Translate(ctx, translationCfg, strings.TrimSpace(text))
 		if err != nil {
 			d.log.Warn("translation failed, keeping raw speech transcript", "error", err)
-			if !paste {
+			if !doPaste {
 				d.opMu.Lock()
 				if d.currentOperation(generation) {
 					d.setPhase(protocol.PhaseSucceeded, transcript, "translation failed: "+err.Error())
@@ -655,7 +656,7 @@ func (d *Daemon) runTranscription(path string, generation uint64, paste bool) {
 		}
 	}
 
-	if !paste {
+	if !doPaste {
 		// Test overlay: recognition only. Expose the transcript as the
 		// succeeded result; the paste pipeline is deliberately untouched.
 		d.opMu.Lock()
@@ -681,7 +682,24 @@ func (d *Daemon) runTranscription(path string, generation uint64, paste bool) {
 		return
 	}
 
-	result := d.paster.Paste(strings.TrimSpace(text))
+	// On darwin the daemon cannot paste: launchd agents have no Aqua
+	// session, so pbcopy and the Cmd+V keystroke silently miss. The client
+	// (menubar app or terminal CLI) pastes from its own GUI context; the
+	// service reports success with the result text so the client can act.
+	var result paste.Result
+	// daemonPaste reports whether the daemon itself should paste. On darwin
+	// it must not (see comment above) — except in tests, which inject a fake
+	// paster to assert the pipeline; the production paster is the concrete
+	// pastePaster adapter.
+	if runtime.GOOS == "darwin" {
+		if _, isProd := d.paster.(pastePaster); isProd {
+			result = paste.Result{Pasted: true, Backend: "client", Detail: "pasted by the requesting client"}
+		} else {
+			result = d.paster.Paste(strings.TrimSpace(text))
+		}
+	} else {
+		result = d.paster.Paste(strings.TrimSpace(text))
+	}
 	if !d.currentOperation(generation) {
 		return
 	}

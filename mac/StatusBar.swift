@@ -395,6 +395,13 @@ final class VoiceMenu: NSObject {
             // Already shown this outcome once — the service keeps reporting
             // it until the next operation starts.
             guard lastTerminalPhase != phase else { return }
+            // macOS paste ownership: the launchd service has no Aqua
+            // session, so its pbcopy/osascript silently miss (verified:
+            // pbcopy from a launchd agent no-ops). The service transcribes;
+            // THIS app — a GUI process — owns the pasteboard and the Cmd+V.
+            if phase == "succeeded", let text = obj["last_result"] as? String, !text.isEmpty {
+                pasteLocally(text)
+            }
             showTerminal(phase, detail: obj["last_error"] as? String)
             return
         default:
@@ -415,6 +422,20 @@ final class VoiceMenu: NSObject {
         guard newState != state else { return }
         state = newState
         render()
+    }
+
+
+    /// Put text on the system pasteboard and inject Cmd+V into the
+    /// frontmost app. NSPasteboard talks to the pasteboard server directly
+    /// from this GUI process — the path the launchd service cannot take.
+    /// The keystroke needs this app's Accessibility grant.
+    private func pasteLocally(_ text: String) {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(text, forType: .string)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            _ = self?.capture("osascript -e 'tell application \"System Events\" to keystroke \"v\" using command down' 2>/dev/null")
+        }
     }
 
     /// Display a terminal phase (succeeded/failed) once, then fall back to

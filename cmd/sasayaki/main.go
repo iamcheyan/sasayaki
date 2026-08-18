@@ -19,6 +19,7 @@ import (
 
 	"github.com/iamcheyan/sasayaki/internal/config"
 	"github.com/iamcheyan/sasayaki/internal/diagnostics"
+	"github.com/iamcheyan/sasayaki/internal/protocol"
 	"github.com/iamcheyan/sasayaki/internal/service"
 	"github.com/iamcheyan/sasayaki/internal/setup"
 	"github.com/iamcheyan/sasayaki/internal/transcribe"
@@ -365,8 +366,12 @@ func runCancel(paths config.Paths) error {
 }
 
 // runDeliver hands an externally finalized WAV (recorded by the macOS
-// menubar app, which owns the microphone) to the service for the transcribe
-// → (translate) → paste pipeline.
+// menubar app, which owns the microphone) to the service for transcription.
+// On darwin it then waits for the terminal phase and pastes the result from
+// THIS process: a launchd service has no Aqua session, so pbcopy and the
+// Cmd+V keystroke from the daemon silently miss, while a terminal child
+// inherits the terminal's GUI session and the menubar app is a GUI process.
+// On linux the daemon pastes itself and deliver returns immediately.
 func runDeliver(paths config.Paths, wav string, translate bool) error {
 	abs, err := filepath.Abs(wav)
 	if err != nil {
@@ -379,10 +384,55 @@ func runDeliver(paths config.Paths, wav string, translate bool) error {
 	if response.Message != "" {
 		fmt.Println(response.Message)
 	}
-	if !response.OK && response.Error != nil {
-		return fmt.Errorf("%s", response.Error.Detail)
+	if !response.OK {
+		if response.Error != nil {
+			return fmt.Errorf("%s", response.Error.Detail)
+		}
+		return nil
 	}
-	return nil
+	if runtime.GOOS != "darwin" {
+		return nil
+	}
+	// Poll to the terminal phase, then paste from this process.
+	deadline := time.Now().Add(2 * time.Minute)
+	for time.Now().Before(deadline) {
+		time.Sleep(300 * time.Millisecond)
+		state, err := service.Request(paths, "status")
+		if err != nil {
+			continue
+		}
+		st := state.State
+		if st == nil {
+			return nil
+		}
+		switch st.Phase {
+		case protocol.PhaseSucceeded:
+			text := st.LastResult
+			if strings.TrimSpace(text) == "" {
+				return fmt.Errorf("no speech detected in the recording")
+			}
+			pasteFromClient(text)
+			return nil
+		case protocol.PhaseFailed:
+			detail := st.LastError
+			if detail == "" {
+				detail = "transcription failed"
+			}
+			return fmt.Errorf("%s", detail)
+		}
+	}
+	return fmt.Errorf("timed out waiting for transcription")
+}
+
+// pasteFromClient is the darwin client-side paste: pbcopy + Cmd+V via
+// System Events. Requires the running terminal's Accessibility grant.
+func pasteFromClient(text string) {
+	cmd := exec.Command("pbcopy")
+	cmd.Stdin = strings.NewReader(text)
+	_ = cmd.Run()
+	_ = exec.Command("osascript", "-e",
+		`tell application "System Events" to keystroke "v" using command down`).Run()
+	fmt.Println(text)
 }
 
 // runBindings prints the configured Hyprland keybindings in the
