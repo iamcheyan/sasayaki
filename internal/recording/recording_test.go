@@ -5,26 +5,9 @@ import (
 	"encoding/binary"
 	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
 	"time"
 )
-
-func TestParecordArgs(t *testing.T) {
-	// The recorder receives the final WAV path and captures raw s16le to
-	// <wav>.raw; Go wraps it into the WAV container afterwards.
-	got := ParecordArgs("/tmp/rec.wav")
-	want := []string{
-		"--format=s16le",
-		"--rate=16000",
-		"--channels=1",
-		"--latency-msec=10",
-		"/tmp/rec.wav.raw",
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("ParecordArgs = %v, want %v", got, want)
-	}
-}
 
 func TestWriteWAVHeader(t *testing.T) {
 	dir := t.TempDir()
@@ -89,47 +72,53 @@ func TestReadDuration(t *testing.T) {
 	}
 }
 
-func TestFinalizeEmpty(t *testing.T) {
+// ffmpeg inserts a LIST INFO chunk between fmt and data, so the audio
+// payload does not sit at the canonical 44-byte offset. ReadDuration must
+// walk the chunks instead of trusting fixed offsets, or every darwin
+// recording is misparsed.
+func TestReadDurationWalksChunks(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "empty.wav")
-	if _, err := finalize(path); err == nil {
-		t.Fatal("finalize accepted a missing raw file")
-	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatal("finalize left a partial WAV behind")
-	}
-}
+	path := filepath.Join(dir, "ffmpeg.wav")
 
-func TestFinalizeWrapsRaw(t *testing.T) {
-	dir := t.TempDir()
-	wav := filepath.Join(dir, "in.wav")
-	raw := wav + ".raw" // finalize reads <path>.raw
-
-	samples := make([]byte, SampleRate*2*500/1000) // 500 ms silence
-	// Fill with a tone so the data section is not mistaken for all-zero.
-	for i := 0; i < len(samples); i += 2 {
-		binary.LittleEndian.PutUint16(samples[i:], 1000)
+	// 250 ms of 16 kHz mono = 8000 bytes of PCM.
+	data := make([]byte, SampleRate*2*250/1000)
+	for i := 0; i < len(data); i += 2 {
+		binary.LittleEndian.PutUint16(data[i:], 1000)
 	}
-	if err := os.WriteFile(raw, samples, 0o600); err != nil {
+	// fmt chunk (16 bytes) + LIST chunk ("INFO" + ISFT sub-chunk, 24
+	// bytes, even) before data, mirroring ffmpeg's wav muxer.
+	list := []byte("INFOISFT\x0c\x00\x00\x00Lavf62.1.1\x00\x00")
+	wav := bytes.NewBuffer(nil)
+	wav.WriteString("RIFF")
+	payload := 4 + 8 + 16 + 8 + len(list) + 8 + len(data)
+	binary.Write(wav, binary.LittleEndian, uint32(payload))
+	wav.WriteString("WAVE")
+	blockAlign := Channels * Bits / 8
+	var fmtBody [16]byte
+	binary.LittleEndian.PutUint16(fmtBody[0:2], 1) // PCM
+	binary.LittleEndian.PutUint16(fmtBody[2:4], uint16(Channels))
+	binary.LittleEndian.PutUint32(fmtBody[4:8], SampleRate)
+	binary.LittleEndian.PutUint32(fmtBody[8:12], uint32(SampleRate*blockAlign))
+	binary.LittleEndian.PutUint16(fmtBody[12:14], uint16(blockAlign))
+	binary.LittleEndian.PutUint16(fmtBody[14:16], uint16(Bits))
+	wav.WriteString("fmt ")
+	binary.Write(wav, binary.LittleEndian, uint32(16))
+	wav.Write(fmtBody[:])
+	wav.WriteString("LIST")
+	binary.Write(wav, binary.LittleEndian, uint32(len(list)))
+	wav.Write(list)
+	wav.WriteString("data")
+	binary.Write(wav, binary.LittleEndian, uint32(len(data)))
+	wav.Write(data)
+	if err := os.WriteFile(path, wav.Bytes(), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	duration, err := finalize(wav)
+	duration, err := ReadDuration(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if duration != 500*time.Millisecond {
-		t.Fatalf("duration = %v, want 500ms", duration)
-	}
-	got, err := os.ReadFile(wav)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got[44:], samples) {
-		t.Fatal("WAV data section does not match the raw capture")
-	}
-	// The raw capture must be consumed.
-	if _, err := os.Stat(raw); !os.IsNotExist(err) {
-		t.Fatal("finalize left the raw capture behind")
+	if duration != 250*time.Millisecond {
+		t.Fatalf("duration = %v, want 250ms", duration)
 	}
 }

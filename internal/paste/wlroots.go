@@ -1,3 +1,5 @@
+//go:build linux
+
 package paste
 
 // Focus resolution for wlroots-family compositors (labwc, wayfire, river,

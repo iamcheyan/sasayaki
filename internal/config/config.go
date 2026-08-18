@@ -189,9 +189,6 @@ func (p Paths) RequirementsFile() string {
 func (p Paths) VenvMarker() string {
 	return filepath.Join(p.VenvDir(), "sasayaki.installed")
 }
-func (p Paths) ServiceFile() string {
-	return filepath.Join(filepath.Dir(p.ConfigHome), "systemd", "user", "sasayaki.service")
-}
 func (p Paths) Socket() string        { return filepath.Join(p.Runtime, "sasayaki.sock") }
 func (p Paths) RecordingsDir() string { return filepath.Join(p.StateHome, "recordings") }
 

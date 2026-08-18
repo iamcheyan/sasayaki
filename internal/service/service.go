@@ -142,7 +142,7 @@ func newDaemon(paths config.Paths, cfg config.Config, log *slog.Logger) *Daemon 
 		paths:       paths,
 		cfg:         cfg,
 		log:         log,
-		newRecorder: func() recording.Recorder { return recording.NewParecord() },
+		newRecorder: func() recording.Recorder { return recording.NewDefault() },
 		transcriber: nil, // set by New or by the test
 		paster:      pastePaster{},
 		micOK:       func() bool { _, err := exec.LookPath("parecord"); return err == nil },
@@ -961,18 +961,6 @@ func RequestDiagnose(paths config.Paths) (diagnostics.Report, error) {
 	}
 	return report, nil
 }
-
-// Systemctl runs a systemctl --user command.
-func Systemctl(args ...string) error {
-	cmd := exec.Command("systemctl", append([]string{"--user"}, args...)...)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("systemctl %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
-	}
-	return nil
-}
-
-// IsActive reports whether the user unit is active.
-func IsActive() bool { return Systemctl("is-active", "--quiet", UnitName) == nil }
 
 func hasBinary(name string) bool {
 	_, err := exec.LookPath(name)

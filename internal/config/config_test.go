@@ -31,9 +31,6 @@ func TestNewPathsHonorsXDGOverrides(t *testing.T) {
 	if p.Socket() != filepath.Join(base, "run", "sasayaki", "sasayaki.sock") {
 		t.Errorf("socket = %q", p.Socket())
 	}
-	if p.ServiceFile() != filepath.Join(base, "cfg", "systemd", "user", "sasayaki.service") {
-		t.Errorf("service file = %q", p.ServiceFile())
-	}
 }
 
 func TestNewPathsFallsBackToHome(t *testing.T) {
@@ -46,8 +43,8 @@ func TestNewPathsFallsBackToHome(t *testing.T) {
 	if p.ConfigFile() != filepath.Join(home, ".config", "sasayaki", "config.json") {
 		t.Errorf("config = %q", p.ConfigFile())
 	}
-	if !strings.HasPrefix(p.Runtime, "/tmp") {
-		t.Errorf("runtime fallback = %q, want under /tmp", p.Runtime)
+	if !strings.HasPrefix(p.Runtime, os.TempDir()) {
+		t.Errorf("runtime fallback = %q, want under %s", p.Runtime, os.TempDir())
 	}
 }
 

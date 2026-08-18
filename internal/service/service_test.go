@@ -122,7 +122,13 @@ func (f *fakePaster) pastedTexts() []string {
 
 func testPaths(t *testing.T) config.Paths {
 	t.Helper()
-	base := t.TempDir()
+	// macOS caps unix socket paths at 104 characters; t.TempDir()'s long
+	// per-test names overflow it, so use a short private root instead.
+	base, err := os.MkdirTemp("", "svc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
 	return config.Paths{
 		ConfigHome: filepath.Join(base, "config"),
 		DataHome:   filepath.Join(base, "data"),

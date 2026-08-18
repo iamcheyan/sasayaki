@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/iamcheyan/sasayaki/internal/config"
 	"github.com/iamcheyan/sasayaki/internal/engine"
@@ -91,7 +90,7 @@ func Plan(cfg config.Config) []*Step {
 			ID: "python", Title: "Checking python3",
 			run: func(p config.Paths) (string, error) {
 				if _, err := lookPath("python3"); err != nil {
-					return "", fmt.Errorf("python3 is required but not installed; install it (e.g. dnf install python3 / apt install python3) and re-run `sasayaki setup`")
+					return "", fmt.Errorf("python3 is required but not installed; %s", pythonInstallHint)
 				}
 				return "python3 found", nil
 			},
@@ -171,18 +170,7 @@ func Plan(cfg config.Config) []*Step {
 		{
 			ID: "systemd", Title: "Enabling and starting the user service",
 			run: func(p config.Paths) (string, error) {
-				if err := systemctl("daemon-reload"); err != nil {
-					return "", err
-				}
-				if err := systemctl("enable", "--now", "sasayaki.service"); err != nil {
-					return "", err
-				}
-				// Applying setup is also how a newly selected local model becomes
-				// active. `enable --now` does not restart an already active unit.
-				if err := systemctl("restart", "sasayaki.service"); err != nil {
-					return "", err
-				}
-				return "service enabled, started and refreshed", nil
+				return enableAndStart()
 			},
 		},
 	}
@@ -269,34 +257,6 @@ var serviceBinary string
 
 // SetBinary tells setup which sasayaki binary the user unit must start.
 func SetBinary(path string) { serviceBinary = path }
-
-// unitCurrent reports whether the existing unit matches what setup would
-// write for the current binary.
-func unitCurrent(p config.Paths) bool {
-	if serviceBinary == "" {
-		return false
-	}
-	b, err := os.ReadFile(p.ServiceFile())
-	if err != nil {
-		return false
-	}
-	text := string(b)
-	if !strings.Contains(text, "ExecStart="+serviceBinary+" serve") {
-		return false
-	}
-	// Re-render units created by older Sasayaki versions. In particular,
-	// NixOS keeps parecord and the C++ runtime outside /usr/bin; an old fixed
-	// PATH makes the repair button appear to succeed while recording fails.
-	if _, err := os.Stat("/run/current-system/sw/bin"); err == nil &&
-		!strings.Contains(text, "Environment=PATH=/run/current-system/sw/bin") {
-		return false
-	}
-	if _, err := os.Stat("/nix/store"); err == nil &&
-		!strings.Contains(text, "Environment=LD_LIBRARY_PATH=") {
-		return false
-	}
-	return true
-}
 
 // fileExists is a tiny helper kept local to setup.
 func fileExists(path string) bool {
