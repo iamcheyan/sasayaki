@@ -133,6 +133,46 @@ Then press **F13** once to start recording, again to stop and transcribe —
 the result is pasted into whatever window has focus. **F14** records and
 translates. The menu-bar icon shows state (idle/recording/transcribing).
 
+### Installing a prebuilt download
+
+Each push to `main` publishes a rolling [**Latest build**
+release](https://github.com/iamcheyan/sasayaki/releases/latest) with
+binaries for all four targets:
+
+- `Sasayaki-macos-arm64.zip` — Apple Silicon
+- `Sasayaki-macos-amd64.zip` — Intel
+- `sasayaki-linux-amd64.tar.gz` / `sasayaki-linux-arm64.tar.gz`
+
+The macOS bundles are **ad-hoc signed** (CI has no Developer ID, so they
+are not notarized). macOS Gatekeeper will block the first launch — strip
+the quarantine attribute and grant the two TCC permissions:
+
+```sh
+xattr -dr com.apple.quarantine /path/to/Sasayaki.app
+open /path/to/Sasayaki.app        # then grant Microphone + Accessibility
+```
+
+Ad-hoc signing keys the TCC grant to the binary's cdhash, so a freshly
+downloaded build needs its own grant. For a grant that survives rebuilds,
+build from source instead (below) — `mac/sign.sh` signs with a stable
+self-signed identity.
+
+### Rebuilding during development
+
+When iterating on the menu-bar app, recompile and re-sign in one step so
+the Accessibility/Microphone grants survive:
+
+```sh
+sh mac/dev-rebuild.sh   # swiftc the menubar binary + re-sign + relaunch
+```
+
+`dev-rebuild.sh` re-signs with the stable `sumika-voice-dev` identity, so
+the TCC grants stay valid across rebuilds. A bare `swiftc` without
+re-signing falls back to ad-hoc (cdhash) signing and **breaks auto-paste
+on every recompile** — that is the "paste stops working after rebuild"
+symptom. If you hit it, re-run `mac/dev-rebuild.sh` (or `mac/sign.sh`)
+once; the next rebuild is fine.
+
 > The signing identity (`sumika-voice-dev`) is created automatically by
 > `mac/sign.sh` on first build. TCC grants bind to the code signature, so a
 > fixed identity means you grant once and rebuild freely. Ad-hoc signing
