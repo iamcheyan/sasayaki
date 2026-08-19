@@ -1,7 +1,9 @@
 /sasayaki
 /dist/
+/build/
 *.part
 *.wav
 __pycache__/
 *.pyc
 .venv/
+.DS_Store

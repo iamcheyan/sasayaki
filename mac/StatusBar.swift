@@ -8,8 +8,9 @@
 //    F13 — toggle voice input: record → transcribe → paste
 //    F14 — toggle translation: record → transcribe → translate → paste
 //
-//  States: idle / recording (yellow mic.fill) / transcribing (orange
-//  waveform) / translating (blue globe) / succeeded / failed (transient).
+//  States: idle / recording (white waveform, blinking) / transcribing
+//  (orange waveform) / translating (blue globe) / succeeded / failed
+//  (transient).
 //
 //  The app records natively via AVAudioEngine (the TCC mic grant follows
 //  the process that records) and hands the finalized WAV to the sibling
@@ -786,8 +787,8 @@ final class VoiceMenu: NSObject {
     private func render() {
         // Icon policy (state mapping from SasayakiInput.qml):
         //   idle         — white template mic (matches menu bar, dark & light)
-        //   recording    — yellow filled mic
-        //   transcribing — orange waveform, blinking (识别动画)
+        //   recording    — white template waveform, blinking (识别动画)
+        //   transcribing — orange waveform, blinking
         //   translating  — blue waveform+globe, blinking
         //   succeeded    — green check, transient 1.5 s
         //   failed       — red warning, transient 2 s
@@ -795,7 +796,7 @@ final class VoiceMenu: NSObject {
         let tint: NSColor?
         let template: Bool
         switch state {
-        case "recording":    (icon, tint, template) = ("mic.fill", .systemYellow, false)
+        case "recording":    (icon, tint, template) = ("waveform", nil, true)
         case "transcribing": (icon, tint, template) = ("waveform", .systemOrange, false)
         case "translating":  (icon, tint, template) = ("waveform.badge.globe", .systemBlue, false)
         case "succeeded":    (icon, tint, template) = ("checkmark.circle.fill", .systemGreen, false)
@@ -806,8 +807,8 @@ final class VoiceMenu: NSObject {
         item.button?.image?.isTemplate = template
         item.button?.contentTintColor = tint
 
-        // Blink during processing states.
-        let busy = (state == "transcribing" || state == "translating")
+        // Blink during processing states (recording + transcribing + translating).
+        let busy = (state == "recording" || state == "transcribing" || state == "translating")
         if busy {
             if blinkTimer == nil {
                 blinkOn = true
@@ -824,9 +825,12 @@ final class VoiceMenu: NSObject {
             item.button?.alphaValue = 1.0
         }
 
-        toggleItem?.title = busy ? "处理中…" : (state == "recording" ? "停止并转写" : "开始录音 (F13)")
-        toggleItem?.isEnabled = !busy
-        cancelItem?.isEnabled = (state == "recording" || busy)
+        // Menu: recording stays toggleable (press to stop); only the
+        // downstream processing states (transcribing/translating) lock it.
+        let processing = (state == "transcribing" || state == "translating")
+        toggleItem?.title = processing ? "处理中…" : (state == "recording" ? "停止并转写" : "开始录音 (F13)")
+        toggleItem?.isEnabled = !processing
+        cancelItem?.isEnabled = (state == "recording" || processing)
 
         let on = launchAtLoginEnabled()
         launchItem?.state = on ? .on : .off
