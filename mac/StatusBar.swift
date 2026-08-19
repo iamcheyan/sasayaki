@@ -812,40 +812,33 @@ final class VoiceMenu: NSObject {
 
     private func render() {
         // Icon policy:
-        //   idle                              — template mic (menu-bar color)
+        //   idle                              — template mic (adapts to bar)
         //   recording / transcribing / translating
-        //                                    — template waveform, smooth
+        //                                    — baked waveform, smooth
         //                                      white↔blue color pulse (识别动画)
-        //   succeeded                         — template green check (1.5 s)
-        //   failed                            — template red waveform (brief
-        //                                      cue, NO exclamation), 2 s
+        //   succeeded                         — baked green check (1.5 s)
+        //   failed                            — baked red waveform (brief cue,
+        //                                      NO exclamation), 2 s
         //
-        // All colored icons are template images + contentTintColor. The menu
-        // bar only honors contentTintColor for *template* images; non-template
-        // SF Symbols fall back to their built-in multicolor palette (the
-        // warning triangle is yellow), which is why the old failed icon read
-        // as a stray yellow ⚠️ instead of the intended red.
-        let icon: String
-        let tint: NSColor?
-        let pulse: Bool
+        // NSStatusBarButton enforces template rendering and IGNORES
+        // contentTintColor (and even strips paletteColors on a template
+        // image). So colored icons are BAKED into the image via
+        // SymbolConfiguration(paletteColors:) with isTemplate=false — the bar
+        // then renders the baked pixels as-is. The idle mic stays a plain
+        // template image so it adapts to light/dark menus.
+        stopPulse()
+        item.button?.alphaValue = 1.0
+        item.button?.contentTintColor = nil
         switch state {
         case "recording", "transcribing", "translating":
-            (icon, tint, pulse) = ("waveform", nil, true)
+            startPulse()                       // re-bakes waveform each frame
         case "succeeded":
-            (icon, tint, pulse) = ("checkmark.circle.fill", .systemGreen, false)
+            setBakedSymbol("checkmark.circle.fill", colors: [.white, .systemGreen])
         case "failed":
-            (icon, tint, pulse) = ("waveform", .systemRed, false)
+            setBakedSymbol("waveform", colors: [.systemRed])
         default:
-            (icon, tint, pulse) = ("mic", nil, false)
-        }
-        item.button?.image = NSImage(systemSymbolName: icon, accessibilityDescription: "语音输入")
-        item.button?.image?.isTemplate = true
-        item.button?.alphaValue = 1.0
-        stopPulse()
-        if pulse {
-            startPulse()            // drives contentTintColor white↔blue
-        } else {
-            item.button?.contentTintColor = tint
+            item.button?.image = NSImage(systemSymbolName: "mic", accessibilityDescription: "语音输入")
+            item.button?.image?.isTemplate = true
         }
 
         // Menu: recording stays toggleable (press to stop); only the
@@ -860,10 +853,10 @@ final class VoiceMenu: NSObject {
     }
 
     // ── White↔blue pulse ───────────────────────────────────────────────
-    // A smooth sine color pulse on the template waveform: contentTintColor
-    // oscillates between the menu-bar icon color (white in dark mode) and
-    // systemBlue, so the icon reads "white fading into blue, blue and white
-    // interweaving" — a gentle breath instead of a hard on/off blink.
+    // A smooth sine color pulse on the waveform: each frame re-bakes the
+    // symbol with a palette color interpolated between white and systemBlue,
+    // so the icon reads "white fading into blue, blue and white interweaving"
+    // — a gentle breath instead of a hard on/off blink.
 
     private func stopPulse() {
         pulseTimer?.invalidate()
@@ -883,16 +876,17 @@ final class VoiceMenu: NSObject {
     private func applyPulse(step: CGFloat) {
         // t ∈ [0,1] via a sine wave (~2.1 s full white→blue→white cycle).
         let t = (sin(step * 3.0) + 1) / 2
-        item.button?.contentTintColor = blend(menuBarIconColor(), .systemBlue, t)
+        setBakedSymbol("waveform", colors: [blend(.white, .systemBlue, t)])
     }
 
-    /// The menu bar's template-icon color: white in dark mode, near-black in
-    /// light mode — the "white" end of the pulse, so it stays visible on both.
-    private func menuBarIconColor() -> NSColor {
-        let name = item.button?.effectiveAppearance.name.rawValue ?? ""
-        // Any dark appearance (darkAqua, vibrantDark, high-contrast dark, …)
-        // renders template icons white; light appearances render them dark.
-        return name.contains("Dark") ? .white : .black
+    /// Bake a palette-colored SF Symbol into a non-template image so the
+    /// menu bar renders our colors instead of its own template tint.
+    private func setBakedSymbol(_ name: String, colors: [NSColor]) {
+        let cfg = NSImage.SymbolConfiguration(paletteColors: colors)
+        let img = NSImage(systemSymbolName: name, accessibilityDescription: "语音输入")?
+            .withSymbolConfiguration(cfg)
+        img?.isTemplate = false
+        item.button?.image = img
     }
 
     /// Linear sRGB blend of two colors at factor t (0 → a, 1 → b).
