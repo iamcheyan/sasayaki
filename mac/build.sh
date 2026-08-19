@@ -2,10 +2,9 @@
 # Build the macOS menu bar app bundle for Sasayaki.
 # Output: dist/Sasayaki.app (Contents/MacOS: sasayaki-menubar + sasayaki).
 #
-# Env knobs:
-#   SIGN_MODE=adhoc  — ad-hoc sign instead of mac/sign.sh's stable cert
-#                      (used in CI, where the self-signed identity is absent).
 #   GOARCH           — Go target arch (default: host). Matches the runner.
+#   SWIFT_TARGET     — swiftc -target triple for cross-compiling the menubar
+#                      binary (e.g. x86_64-apple-macos11). Empty = host arch.
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -14,7 +13,9 @@ HOST_ARCH="$(uname -m)"
 [ "$HOST_ARCH" = "x86_64" ] && HOST_ARCH=amd64
 CGO_ENABLED=0 GOARCH="${GOARCH:-$HOST_ARCH}" \
   go build -trimpath -ldflags="-s -w" -o build/sasayaki ./cmd/sasayaki
-swiftc -O -o build/sasayaki-menubar mac/StatusBar.swift
+SWIFT_FLAGS="-O"
+[ -n "${SWIFT_TARGET:-}" ] && SWIFT_FLAGS="$SWIFT_FLAGS -target $SWIFT_TARGET"
+swiftc $SWIFT_FLAGS -o build/sasayaki-menubar mac/StatusBar.swift
 
 APP="dist/Sasayaki.app"
 rm -rf "$APP"

@@ -41,9 +41,10 @@ jobs:
             goarch: arm64
             artifact: Sasayaki-macos-arm64.zip
           - name: macos-amd64
-            runner: macos-13          # Intel — native x86_64
-            goos: darwin
+            runner: macos-14          # cross-compile x86_64 from Apple Silicon
+            goos: darwin               # (avoids scarce macos-13 Intel runners)
             goarch: amd64
+            swift_target: x86_64-apple-macos11
             artifact: Sasayaki-macos-amd64.zip
     steps:
       - uses: actions/checkout@v4
@@ -69,6 +70,7 @@ jobs:
         if: matrix.goos == 'darwin'
         env:
           GOARCH: ${{ matrix.goarch }}
+          SWIFT_TARGET: ${{ matrix.swift_target }}
           SIGN_MODE: adhoc
         run: |
           sh mac/build.sh
