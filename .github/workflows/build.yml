@@ -1,0 +1,121 @@
+name: build-release
+
+# On every push to main, build platform binaries and publish a rolling
+# "latest" prerelease on GitHub so users can download them immediately.
+# Targets: linux/amd64, linux/arm64, macos/arm64, macos/amd64.
+#
+# Linux: pure-Go `sasayaki` binary, cross-compiled on an Ubuntu runner.
+# macOS: Sasayaki.app bundle (Go `sasayaki` + Swift `sasayaki-menubar`),
+#        built natively on matching-arch macOS runners, ad-hoc signed
+#        (no Developer ID / notarization — see mac/build.sh SIGN_MODE).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # create tags + releases
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-amd64
+            runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            artifact: sasayaki-linux-amd64.tar.gz
+          - name: linux-arm64
+            runner: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            artifact: sasayaki-linux-arm64.tar.gz
+          - name: macos-arm64
+            runner: macos-14          # Apple Silicon — native arm64
+            goos: darwin
+            goarch: arm64
+            artifact: Sasayaki-macos-arm64.zip
+          - name: macos-amd64
+            runner: macos-13          # Intel — native x86_64
+            goos: darwin
+            goarch: amd64
+            artifact: Sasayaki-macos-amd64.zip
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build Linux binary
+        if: matrix.goos == 'linux'
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
+            -o dist/sasayaki ./cmd/sasayaki
+          chmod +x dist/sasayaki
+          tar -C dist -czf "${{ matrix.artifact }}" sasayaki
+
+      - name: Build macOS app bundle
+        if: matrix.goos == 'darwin'
+        env:
+          GOARCH: ${{ matrix.goarch }}
+          SIGN_MODE: adhoc
+        run: |
+          sh mac/build.sh
+          cd dist && zip -qry "../${{ matrix.artifact }}" Sasayaki.app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+
+  release:
+    name: publish latest release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: Create rolling "latest" release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.sha }}
+        run: |
+          cd assets
+          ls -la
+          # Replace the rolling "latest" prerelease each push so the
+          # /releases/latest URL always points at the newest binaries.
+          gh release delete latest --yes --cleanup-tag 2>/dev/null || true
+          gh release create latest --prerelease \
+            --title "Latest build" \
+            --notes "Automated build from commit ${SHA:0:7}.
+
+          ### Downloads
+          - **Linux x86_64**: \`sasayaki-linux-amd64.tar.gz\`
+          - **Linux aarch64**: \`sasayaki-linux-arm64.tar.gz\`
+          - **macOS Apple Silicon**: \`Sasayaki-macos-arm64.zip\`
+          - **macOS Intel**: \`Sasayaki-macos-amd64.zip\`
+
+          ### macOS install
+          Extract, then strip Gatekeeper quarantine and open:
+          \`\`\`
+          xattr -dr com.apple.quarantine Sasayaki.app
+          open Sasayaki.app
+          \`\`\`
+          Grant Microphone + Accessibility when prompted. For a TCC grant
+          that survives rebuilds, re-sign locally with \`sh mac/sign.sh\`." \
+            *.tar.gz *.zip
