@@ -122,6 +122,37 @@ Signing: `mac/sign.sh` creates a fixed self-signed identity
 stable designated requirement and survive rebuilds. Ad-hoc signing would
 re-prompt on every rebuild.
 
+### Menu-bar icon rendering
+
+The status-item icon (`mac/StatusBar.swift`) goes through several states
+(idle mic → white↔blue pulsing waveform → green check → red waveform).
+Coloring SF Symbols in an `NSStatusItem` has two traps that both cost a
+round-trip each:
+
+1. **`NSStatusBarButton` ignores `contentTintColor`.** It enforces template
+   rendering and strips custom color, so:
+   - a *non-template* symbol + `contentTintColor` renders the symbol's
+     **built-in multicolor palette**, not your tint —
+     `exclamationmark.triangle.fill` showed up as a stray **yellow ⚠️**
+     (its default palette) instead of the intended red;
+   - a *template* image + `contentTintColor` renders as a flat **monochrome
+     mask** (black) with the tint discarded — every colored icon went black.
+2. **The fix: bake the colors into the image.** Build the symbol with
+   `NSImage.SymbolConfiguration(paletteColors:)` →
+   `.withSymbolConfiguration(cfg)`, set `isTemplate = false`, and assign it.
+   The menu bar then renders the baked pixels directly. Each colored state
+   (waveform, checkmark, failed) is baked; the idle mic stays a plain
+   **template** image so it adapts to light/dark menus.
+3. **Animation = re-bake, not tint animation.** The white↔blue pulse can't
+   animate `contentTintColor` (ignored); instead it re-bakes the waveform
+   each frame (~20 fps) with a palette color sine-interpolated between
+   white and `systemBlue`.
+
+The baked colors were verified by rasterizing each symbol and sampling
+   pixels (blue waveform `r0g3b5`, white `r5g5b5`, red `r5g1b1`, green
+   circle + white check) — don't trust the menu bar visually until the
+   pixel check passes.
+
 ## Desktop input boundary
 
 Wayland prevents arbitrary programs from globally listening for key presses or
