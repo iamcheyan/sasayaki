@@ -8,9 +8,8 @@
 //    F13 — toggle voice input: record → transcribe → paste
 //    F14 — toggle translation: record → transcribe → translate → paste
 //
-//  States: idle / recording (white waveform, blinking) / transcribing
-//  (orange waveform) / translating (blue globe) / succeeded / failed
-//  (transient).
+//  States: idle / recording+transcribing+translating (white↔blue pulsing
+//  waveform) / succeeded (green check) / failed (red waveform, transient).
 //
 //  The app records natively via AVAudioEngine (the TCC mic grant follows
 //  the process that records) and hands the finalized WAV to the sibling
@@ -175,8 +174,9 @@ final class VoiceMenu: NSObject {
     private var state = "idle"   // idle | recording | transcribing | translating | succeeded | failed
     private var polling = false
     private var lastFire: Date?
-    private var blinkTimer: Timer?
-    private var blinkOn = true
+    // Smooth white↔blue color pulse for the waveform during recognition.
+    private var pulseTimer: Timer?
+    private var pulseStep: CGFloat = 0
     private var launchItem: NSMenuItem?
     private var toggleItem: NSMenuItem?
     private var cancelItem: NSMenuItem?
@@ -335,9 +335,30 @@ final class VoiceMenu: NSObject {
     /// --title — the macOS kitty build has no --class/--name, those are
     /// X11-only), Terminal.app as fallback. Swift port of the darwin path
     /// in sumika-launch-tui.
+    ///
+    /// The terminal must get a clean color environment: the menubar app
+    /// inherits NO_COLOR / CLICOLOR from whatever launched it (e.g. a CI
+    /// shell, an agent harness). Those vars disable colors in lipgloss/
+    /// termenv inside the kitty session, producing a grayscale TUI. Strip
+    /// them so the terminal's own TERM/COLORTERM are the only authority.
     private func launchInTerminal(appID: String, _ argv: [String]) {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
+            var env = ProcessInfo.processInfo.environment
+            // Strip NO_COLOR / CLICOLOR so a GUI-launched binary doesn't
+            // produce a grayscale TUI inside the terminal.
+            env.removeValue(forKey: "NO_COLOR")
+            env.removeValue(forKey: "CLICOLOR")
+            env.removeValue(forKey: "CLICOLOR_FORCE")
+            // Strip KITTY_* so a new kitty instance starts instead of
+            // delegating to an existing one (which inherited the dirty
+            // env from the launching shell). Without this, kitty sees
+            // KITTY_LISTEN_ON and opens a window in the OLD instance,
+            // whose env still has NO_COLOR etc.
+            env.removeValue(forKey: "KITTY_LISTEN_ON")
+            env.removeValue(forKey: "KITTY_PID")
+            env.removeValue(forKey: "KITTY_WINDOW_ID")
+            env.removeValue(forKey: "KITTY_PUBLIC_KEY")
             var kitty: String?
             for cand in ["/Applications/kitty.app/Contents/MacOS/kitty",
                          NSHomeDirectory() + "/Applications/kitty.app/Contents/MacOS/kitty"] {
@@ -348,13 +369,17 @@ final class VoiceMenu: NSObject {
                 let p = Process()
                 p.launchPath = kitty
                 p.arguments = ["--title", appID] + argv
+                p.environment = env
                 p.standardOutput = FileHandle.nullDevice
                 p.standardError = FileHandle.nullDevice
                 try? p.run()
                 return
             }
             // Terminal.app fallback: run via do script; escape for
-            // AppleScript strings.
+            // AppleScript strings. The osascript Process inherits our
+            // cleaned env, but Terminal.app's own shell session sources
+            // .zshrc which sets a fresh TERM — NO_COLOR is still stripped
+            // from the parent env so it won't leak into the session.
             let esc = { (s: String) in
                 s.replacingOccurrences(of: "\\", with: "\\\\")
                     .replacingOccurrences(of: "\"", with: "\\\"")
@@ -363,6 +388,7 @@ final class VoiceMenu: NSObject {
             let p = Process()
             p.launchPath = "/usr/bin/osascript"
             p.arguments = ["-e", "tell application \"Terminal\"\nactivate\ndo script \"\(line)\"\nend tell"]
+            p.environment = env
             p.standardOutput = FileHandle.nullDevice
             p.standardError = FileHandle.nullDevice
             try? p.run()
@@ -785,44 +811,41 @@ final class VoiceMenu: NSObject {
     // ── Render ────────────────────────────────────────────────────────────
 
     private func render() {
-        // Icon policy (state mapping from SasayakiInput.qml):
-        //   idle         — white template mic (matches menu bar, dark & light)
-        //   recording    — white template waveform, blinking (识别动画)
-        //   transcribing — orange waveform, blinking
-        //   translating  — blue waveform+globe, blinking
-        //   succeeded    — green check, transient 1.5 s
-        //   failed       — red warning, transient 2 s
+        // Icon policy:
+        //   idle                              — template mic (menu-bar color)
+        //   recording / transcribing / translating
+        //                                    — template waveform, smooth
+        //                                      white↔blue color pulse (识别动画)
+        //   succeeded                         — template green check (1.5 s)
+        //   failed                            — template red waveform (brief
+        //                                      cue, NO exclamation), 2 s
+        //
+        // All colored icons are template images + contentTintColor. The menu
+        // bar only honors contentTintColor for *template* images; non-template
+        // SF Symbols fall back to their built-in multicolor palette (the
+        // warning triangle is yellow), which is why the old failed icon read
+        // as a stray yellow ⚠️ instead of the intended red.
         let icon: String
         let tint: NSColor?
-        let template: Bool
+        let pulse: Bool
         switch state {
-        case "recording":    (icon, tint, template) = ("waveform", nil, true)
-        case "transcribing": (icon, tint, template) = ("waveform", .systemOrange, false)
-        case "translating":  (icon, tint, template) = ("waveform.badge.globe", .systemBlue, false)
-        case "succeeded":    (icon, tint, template) = ("checkmark.circle.fill", .systemGreen, false)
-        case "failed":       (icon, tint, template) = ("exclamationmark.triangle.fill", .systemRed, false)
-        default:             (icon, tint, template) = ("mic", nil, true)
+        case "recording", "transcribing", "translating":
+            (icon, tint, pulse) = ("waveform", nil, true)
+        case "succeeded":
+            (icon, tint, pulse) = ("checkmark.circle.fill", .systemGreen, false)
+        case "failed":
+            (icon, tint, pulse) = ("waveform", .systemRed, false)
+        default:
+            (icon, tint, pulse) = ("mic", nil, false)
         }
         item.button?.image = NSImage(systemSymbolName: icon, accessibilityDescription: "语音输入")
-        item.button?.image?.isTemplate = template
-        item.button?.contentTintColor = tint
-
-        // Blink during processing states (recording + transcribing + translating).
-        let busy = (state == "recording" || state == "transcribing" || state == "translating")
-        if busy {
-            if blinkTimer == nil {
-                blinkOn = true
-                item.button?.alphaValue = 1.0
-                blinkTimer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: true) { [weak self] _ in
-                    guard let self = self else { return }
-                    self.blinkOn.toggle()
-                    self.item.button?.alphaValue = self.blinkOn ? 1.0 : 0.25
-                }
-            }
+        item.button?.image?.isTemplate = true
+        item.button?.alphaValue = 1.0
+        stopPulse()
+        if pulse {
+            startPulse()            // drives contentTintColor white↔blue
         } else {
-            blinkTimer?.invalidate()
-            blinkTimer = nil
-            item.button?.alphaValue = 1.0
+            item.button?.contentTintColor = tint
         }
 
         // Menu: recording stays toggleable (press to stop); only the
@@ -834,6 +857,52 @@ final class VoiceMenu: NSObject {
 
         let on = launchAtLoginEnabled()
         launchItem?.state = on ? .on : .off
+    }
+
+    // ── White↔blue pulse ───────────────────────────────────────────────
+    // A smooth sine color pulse on the template waveform: contentTintColor
+    // oscillates between the menu-bar icon color (white in dark mode) and
+    // systemBlue, so the icon reads "white fading into blue, blue and white
+    // interweaving" — a gentle breath instead of a hard on/off blink.
+
+    private func stopPulse() {
+        pulseTimer?.invalidate()
+        pulseTimer = nil
+    }
+
+    private func startPulse() {
+        pulseStep = 0
+        applyPulse(step: 0)
+        pulseTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            self.pulseStep += 0.05
+            self.applyPulse(step: self.pulseStep)
+        }
+    }
+
+    private func applyPulse(step: CGFloat) {
+        // t ∈ [0,1] via a sine wave (~2.1 s full white→blue→white cycle).
+        let t = (sin(step * 3.0) + 1) / 2
+        item.button?.contentTintColor = blend(menuBarIconColor(), .systemBlue, t)
+    }
+
+    /// The menu bar's template-icon color: white in dark mode, near-black in
+    /// light mode — the "white" end of the pulse, so it stays visible on both.
+    private func menuBarIconColor() -> NSColor {
+        let name = item.button?.effectiveAppearance.name.rawValue ?? ""
+        // Any dark appearance (darkAqua, vibrantDark, high-contrast dark, …)
+        // renders template icons white; light appearances render them dark.
+        return name.contains("Dark") ? .white : .black
+    }
+
+    /// Linear sRGB blend of two colors at factor t (0 → a, 1 → b).
+    private func blend(_ a: NSColor, _ b: NSColor, _ t: CGFloat) -> NSColor {
+        let a = a.usingColorSpace(.sRGB) ?? a
+        let b = b.usingColorSpace(.sRGB) ?? b
+        return NSColor(srgbRed:   a.redComponent   + (b.redComponent   - a.redComponent)   * t,
+                       green:     a.greenComponent + (b.greenComponent - a.greenComponent) * t,
+                       blue:      a.blueComponent  + (b.blueComponent  - a.blueComponent)  * t,
+                       alpha: 1)
     }
 }
 
