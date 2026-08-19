@@ -20,6 +20,8 @@ import (
 	"github.com/iamcheyan/sasayaki/internal/setup"
 	"github.com/iamcheyan/sasayaki/internal/transcribe"
 	"github.com/iamcheyan/sasayaki/internal/translate"
+
+	"github.com/mattn/go-isatty"
 )
 
 // overlays
@@ -162,7 +164,19 @@ func New(paths config.Paths) Model {
 }
 
 // Run starts the TUI and blocks until quit.
+//
+// The TUI may inherit NO_COLOR / CLICOLOR / CI from the launching context
+// (e.g. a CI shell or agent harness). On macOS the menubar app launches
+// the TUI inside kitty, but single-instance kitty can keep those vars.
+// termenv treats CI as "not a TTY" and NO_COLOR as "no color". When
+// stdout is a real TTY we are interactive, so clear them before
+// lipgloss/termenv detects the color profile.
 func Run(paths config.Paths) error {
+	if isatty.IsTerminal(os.Stdout.Fd()) {
+		os.Unsetenv("NO_COLOR")
+		os.Unsetenv("CLICOLOR")
+		os.Unsetenv("CI")
+	}
 	program := tea.NewProgram(New(paths), tea.WithAltScreen())
 	_, err := program.Run()
 	return err
