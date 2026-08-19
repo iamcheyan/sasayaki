@@ -211,14 +211,39 @@ func terminalArgs(t, bin string) ([]string, bool) {
 }
 
 // startDetached launches bin and detaches: the emulator outlives this
-// short-lived launcher process.
+// short-lived launcher process. It strips NO_COLOR / CLICOLOR from the
+// inherited environment so a GUI-launched binary (which may inherit these
+// from a CI shell or agent harness) doesn't produce a grayscale TUI inside
+// the terminal — the terminal's own TERM/COLORTERM must be the only color
+// authority.
 func startDetached(bin string, args []string) error {
 	cmd := exec.Command(bin, args...)
+	cmd.Env = cleanColorEnv(os.Environ())
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 	cmd.Process.Release()
 	return nil
+}
+
+// cleanColorEnv removes env vars that disable terminal colors. The TUI's
+// lipgloss/termenv stack respects NO_COLOR and CLICOLOR=0; CI makes
+// termenv's isTTY() return false even when stdout is a real terminal. If
+// any of these leak in from the launching context (e.g. an agent harness),
+// the terminal session inherits them and renders without color even
+// though the terminal itself supports truecolor.
+func cleanColorEnv(env []string) []string {
+	cleaned := env[:0:0]
+	for _, e := range env {
+		if strings.HasPrefix(e, "NO_COLOR=") ||
+			strings.HasPrefix(e, "CLICOLOR=") ||
+			strings.HasPrefix(e, "CLICOLOR_FORCE=") ||
+			strings.HasPrefix(e, "CI=") {
+			continue
+		}
+		cleaned = append(cleaned, e)
+	}
+	return cleaned
 }
 
 func runServe(paths config.Paths, log *slog.Logger) error {
@@ -839,10 +864,16 @@ To remove Sasayaki completely:
 }
 
 func hasJSONFlag(args []string) bool {
-	flags := flag.NewFlagSet("", flag.ContinueOnError)
-	asJSON := flags.Bool("json", false, "machine-readable output")
-	_ = flags.Parse(args)
-	return *asJSON
+	// Scan the raw tokens: Go's flag.Parse stops at the first positional,
+	// so a leading non-flag (e.g. the WAV path in `deliver <wav> --json`)
+	// would hide a trailing --json and silently drop us into plain-text
+	// mode — which broke the macOS menubar's deliver response parsing.
+	for _, a := range args {
+		if a == "--json" || a == "-json" {
+			return true
+		}
+	}
+	return false
 }
 
 func firstArg(args []string) string {

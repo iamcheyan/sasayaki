@@ -46,7 +46,6 @@ let configPath = NSHomeDirectory() + "/.config/sasayaki/config.json"
 // Staging dir for in-flight native recordings; deliver moves the finished
 // WAV into the service's recordings dir, so retention cleanup owns it.
 let recDir = NSHomeDirectory() + "/.cache/sasayaki/run"
-
 /// Native in-process recorder. The TCC microphone grant obtained via
 /// requestRecordPermission applies to this process's AVAudioEngine — unlike
 /// a spawned ffmpeg, which macOS attributes separately and silently feeds
@@ -184,6 +183,9 @@ final class VoiceMenu: NSObject {
     // next operation; show each outcome exactly once, then return to idle.
     private var terminalTimer: Timer?
     private var lastTerminalPhase: String?
+    // When THIS recording started. Terminal phases with last_at older than
+    // this are leftovers from the previous clip and must not hijack state.
+    private var opStartedAt = Date.distantPast
     // Optimistic hold: keep the busy icon right after a deliver while the
     // service round-trip lands (prevents a busy→idle→busy flash).
     private var optimisticUntil = Date.distantPast
@@ -337,19 +339,21 @@ final class VoiceMenu: NSObject {
     /// in sumika-launch-tui.
     ///
     /// The terminal must get a clean color environment: the menubar app
-    /// inherits NO_COLOR / CLICOLOR from whatever launched it (e.g. a CI
-    /// shell, an agent harness). Those vars disable colors in lipgloss/
-    /// termenv inside the kitty session, producing a grayscale TUI. Strip
-    /// them so the terminal's own TERM/COLORTERM are the only authority.
+    /// inherits NO_COLOR / CLICOLOR / CI from whatever launched it (e.g. a
+    /// CI shell or agent harness). NO_COLOR disables colors in lipgloss/
+    /// termenv; CI makes termenv's isTTY() return false even when stdout is
+    /// a real terminal. Both produce a grayscale TUI. Strip them so the
+    /// terminal's own TERM/COLORTERM are the only authority.  The Go TUI
+    /// also clears these defensively (see tui.Run), so this is belt-and-
+    /// suspenders — useful when the binary predates the Go-side fix.
     private func launchInTerminal(appID: String, _ argv: [String]) {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             var env = ProcessInfo.processInfo.environment
-            // Strip NO_COLOR / CLICOLOR so a GUI-launched binary doesn't
-            // produce a grayscale TUI inside the terminal.
             env.removeValue(forKey: "NO_COLOR")
             env.removeValue(forKey: "CLICOLOR")
             env.removeValue(forKey: "CLICOLOR_FORCE")
+            env.removeValue(forKey: "CI")
             // Strip KITTY_* so a new kitty instance starts instead of
             // delegating to an existing one (which inherited the dirty
             // env from the launching shell). Without this, kitty sees
@@ -426,10 +430,13 @@ final class VoiceMenu: NSObject {
             // Already shown this outcome once — the service keeps reporting
             // it until the next operation starts.
             guard lastTerminalPhase != phase else { return }
-            // macOS paste ownership: the launchd service has no Aqua
-            // session, so its pbcopy/osascript silently miss (verified:
-            // pbcopy from a launchd agent no-ops). The service transcribes;
-            // THIS app — a GUI process — owns the pasteboard and the Cmd+V.
+            // Stale terminal from the PREVIOUS clip: ignore until last_at
+            // is newer than when THIS recording started. Otherwise a poll
+            // right after stop hijacks transcribing → old green-check and
+            // the next F13 starts a new recording (the "need 3 presses" bug).
+            if let lastAt = parseISO8601(obj["last_at"] as? String), lastAt < opStartedAt {
+                return
+            }
             if phase == "succeeded", let text = obj["last_result"] as? String, !text.isEmpty {
                 pasteLocally(text)
             }
@@ -453,6 +460,13 @@ final class VoiceMenu: NSObject {
         guard newState != state else { return }
         state = newState
         render()
+    }
+
+    private func parseISO8601(_ s: String?) -> Date? {
+        guard let s = s else { return nil }
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f.date(from: s)
     }
 
 
@@ -507,34 +521,47 @@ final class VoiceMenu: NSObject {
     /// Toggle with in-app native recording (TCC-safe: the mic grant from
     /// requestRecordPermission applies to THIS process's AVAudioEngine —
     /// no bash/ffmpeg attribution chain that macOS silently zero-fills).
+    ///
+    /// F13 cycle: press 1 = start speaking, press 2 = stop + transcribe + paste.
+    /// A 0.35 s debounce swallows Carbon hotkey auto-repeat (one physical
+    /// tap otherwise fires start AND stop, so the next tap looks like a
+    /// "dead" second press).
     private func nativeToggle(translate: Bool) {
+        let now = Date()
+        if let last = lastFire, now.timeIntervalSince(last) < 0.35 { return }
+        lastFire = now
+
         switch state {
         case "recording":
+            // Claim the stop on this thread BEFORE the async finalize.
+            // Otherwise a second stop() (key-repeat, or a fast second tap
+            // inside the 0.1 s drain) hits running==false, completion(nil),
+            // and flips us back to idle — the "need a third press" bug.
+            watchdog?.invalidate()
+            state = translate ? "translating" : "transcribing"
+            optimisticUntil = Date().addingTimeInterval(0.9)
+            render()
             recorder.stop { wavURL in
                 guard let wavURL = wavURL else {
                     DispatchQueue.main.async {
+                        guard self.state == "transcribing" || self.state == "translating" else { return }
                         self.state = "idle"
                         self.render()
                     }
                     return
                 }
-                DispatchQueue.main.async {
-                    self.state = translate ? "translating" : "transcribing"
-                    // Hold the busy icon across the deliver round-trip; a
-                    // status poll racing ahead of it would flash idle.
-                    self.optimisticUntil = Date().addingTimeInterval(0.9)
-                    self.render()
-                }
-                // hand the finalized WAV to the service: transcribe→(translate)→paste
                 self.deliver(wav: wavURL.path, translate: translate)
             }
         case "transcribing", "translating":
-            break // busy — the service's StillTranscribing guard is authoritative
+            // Already stopping / processing — wait for the green check.
+            break
         default:
             // idle, or showing a transient succeeded/failed result
             terminalTimer?.invalidate()
             let ok = recorder.start()
             if ok {
+                opStartedAt = Date()
+                lastTerminalPhase = nil
                 state = "recording"
                 render()
                 restartWatchdog(translate: translate)
@@ -569,7 +596,6 @@ final class VoiceMenu: NSObject {
             }
         }
     }
-
     private var watchdog: Timer?
     private func restartWatchdog(translate: Bool) {
         watchdog?.invalidate()
@@ -812,26 +838,26 @@ final class VoiceMenu: NSObject {
 
     private func render() {
         // Icon policy:
-        //   idle                              — template mic (adapts to bar)
-        //   recording / transcribing / translating
-        //                                    — baked waveform, smooth
-        //                                      white↔blue color pulse (识别动画)
-        //   succeeded                         — baked green check (1.5 s)
-        //   failed                            — baked red waveform (brief cue,
-        //                                      NO exclamation), 2 s
+        //   idle         — template mic (adapts to the menu bar)
+        //   recording    — baked waveform, white↔blue PULSE (正在听)
+        //   transcribing/translating — baked waveform, STEADY blue (处理中)
+        //                  The pulse→steady change is the visible cue that the
+        //                  stop registered, so the user doesn't re-press.
+        //   succeeded    — baked green check (1.5 s)
+        //   failed       — baked red waveform (brief cue, NO exclamation)
         //
         // NSStatusBarButton enforces template rendering and IGNORES
-        // contentTintColor (and even strips paletteColors on a template
-        // image). So colored icons are BAKED into the image via
-        // SymbolConfiguration(paletteColors:) with isTemplate=false — the bar
-        // then renders the baked pixels as-is. The idle mic stays a plain
-        // template image so it adapts to light/dark menus.
+        // contentTintColor (and strips paletteColors on a template image).
+        // Colored icons are BAKED via SymbolConfiguration(paletteColors:)
+        // with isTemplate=false; the idle mic stays a plain template image.
         stopPulse()
         item.button?.alphaValue = 1.0
         item.button?.contentTintColor = nil
         switch state {
-        case "recording", "transcribing", "translating":
-            startPulse()                       // re-bakes waveform each frame
+        case "recording":
+            startPulse()                                   // pulsing white↔blue
+        case "transcribing", "translating":
+            setBakedSymbol("waveform", colors: [.systemBlue])  // steady blue
         case "succeeded":
             setBakedSymbol("checkmark.circle.fill", colors: [.white, .systemGreen])
         case "failed":

@@ -125,7 +125,8 @@ re-prompt on every rebuild.
 ### Menu-bar icon rendering
 
 The status-item icon (`mac/StatusBar.swift`) goes through several states
-(idle mic → white↔blue pulsing waveform → green check → red waveform).
+(idle mic → pulsing waveform while listening → **steady blue** while
+transcribing → green check → red waveform on real failure).
 Coloring SF Symbols in an `NSStatusItem` has two traps that both cost a
 round-trip each:
 
@@ -146,12 +147,34 @@ round-trip each:
 3. **Animation = re-bake, not tint animation.** The white↔blue pulse can't
    animate `contentTintColor` (ignored); instead it re-bakes the waveform
    each frame (~20 fps) with a palette color sine-interpolated between
-   white and `systemBlue`.
+   white and `systemBlue`. Recording pulses; transcribing is a **steady**
+   blue so the second F13 is visibly acknowledged.
 
 The baked colors were verified by rasterizing each symbol and sampling
-   pixels (blue waveform `r0g3b5`, white `r5g5b5`, red `r5g1b1`, green
-   circle + white check) — don't trust the menu bar visually until the
-   pixel check passes.
+pixels (blue waveform `r0g3b5`, white `r5g5b5`, red `r5g1b1`, green
+circle + white check) — don't trust the menu bar visually until the
+pixel check passes.
+
+### F13 cycle and deliver JSON
+
+F13 is press-1 speak / press-2 stop+transcribe+paste. Two bugs made that
+feel like "second press does nothing, need a third":
+
+1. Carbon hotkey auto-repeat fired start **and** stop on one tap. The
+   second `recorder.stop` (already not running) completed `nil` and
+   flipped the UI back to idle. Debounce 0.35 s and claim
+   `transcribing` **synchronously** on the stop press.
+2. `hasJSONFlag` used `flag.Parse`, which stops at the first positional.
+   `deliver <wav> --no-paste --json` therefore printed plain text, the
+   menubar treated `ok` as nil, flashed red `failed`, then the poll
+   showed the real `succeeded`. Scan argv tokens instead of `flag.Parse`.
+
+Stale `phase=succeeded` from the previous clip must not hijack a new
+operation: ignore terminal phases whose `last_at` is older than
+`opStartedAt`.
+
+TUI color loss when launched from the menu bar (NO_COLOR / CI leaking
+into kitty) is documented in [macos-color-loss.md](macos-color-loss.md).
 
 ## Desktop input boundary
 
