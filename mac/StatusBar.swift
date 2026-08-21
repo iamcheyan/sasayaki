@@ -7,6 +7,7 @@
 //  Menu bar mic icon + global hotkeys:
 //    F13 — toggle voice input: record → transcribe → paste
 //    F14 — toggle translation: record → transcribe → translate → paste
+//    While transcribing/translating, F13/F14 cancel (same as menu Cancel).
 //
 //  States: idle / recording+transcribing+translating (white↔blue pulsing
 //  waveform) / succeeded (green check) / failed (red waveform, transient).
@@ -189,6 +190,10 @@ final class VoiceMenu: NSObject {
     // Optimistic hold: keep the busy icon right after a deliver while the
     // service round-trip lands (prevents a busy→idle→busy flash).
     private var optimisticUntil = Date.distantPast
+    // Set when the user aborts (F13/F14 during processing, or menu Cancel).
+    // In-flight deliver/status from that session must not paste or revive
+    // the busy icon — that was the "hotkey does nothing, click Cancel" bug.
+    private var aborted = false
 
     override init() {
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -424,6 +429,9 @@ final class VoiceMenu: NSObject {
         // While natively recording, THIS process is the authority — the
         // service is idle then and would report its own (stale) phase.
         guard state != "recording" else { return }
+        // Cancelled session: swallow transcribing/succeeded/failed from the
+        // in-flight deliver so a late poll cannot paste or re-busy the icon.
+        if aborted && phase != "idle" { return }
 
         switch phase {
         case "succeeded", "failed":
@@ -526,6 +534,10 @@ final class VoiceMenu: NSObject {
     /// A 0.35 s debounce swallows Carbon hotkey auto-repeat (one physical
     /// tap otherwise fires start AND stop, so the next tap looks like a
     /// "dead" second press).
+    ///
+    /// Press again while transcribing/translating cancels. Previously this
+    /// branch was a no-op, so a stuck deliver left the only escape as the
+    /// menu-bar Cancel item.
     private func nativeToggle(translate: Bool) {
         let now = Date()
         if let last = lastFire, now.timeIntervalSince(last) < 0.35 { return }
@@ -542,22 +554,23 @@ final class VoiceMenu: NSObject {
             optimisticUntil = Date().addingTimeInterval(0.9)
             render()
             recorder.stop { wavURL in
-                guard let wavURL = wavURL else {
-                    DispatchQueue.main.async {
+                DispatchQueue.main.async {
+                    guard !self.aborted else { return }
+                    guard let wavURL = wavURL else {
                         guard self.state == "transcribing" || self.state == "translating" else { return }
                         self.state = "idle"
                         self.render()
+                        return
                     }
-                    return
+                    self.deliver(wav: wavURL.path, translate: translate)
                 }
-                self.deliver(wav: wavURL.path, translate: translate)
             }
         case "transcribing", "translating":
-            // Already stopping / processing — wait for the green check.
-            break
+            cancel()
         default:
             // idle, or showing a transient succeeded/failed result
             terminalTimer?.invalidate()
+            aborted = false
             let ok = recorder.start()
             if ok {
                 opStartedAt = Date()
@@ -585,6 +598,7 @@ final class VoiceMenu: NSObject {
             let (out, _) = self.captureStatus("'\(cli)' deliver '\(wav)'\(flag) --no-paste --json 2>/dev/null")
             let obj = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any]
             DispatchQueue.main.async {
+                guard !self.aborted else { return }
                 if obj?["ok"] as? Bool == true {
                     // Accepted — the poll timer now tracks the service phase.
                     self.optimisticUntil = Date().addingTimeInterval(0.9)
@@ -608,9 +622,14 @@ final class VoiceMenu: NSObject {
     @objc func toggle()          { nativeToggle(translate: false) }
     @objc func toggleTranslate() { nativeToggle(translate: true) }
     @objc func cancel() {
+        aborted = true
+        optimisticUntil = Date.distantPast
         recorder.cancel()
         watchdog?.invalidate()
-        fireCli("cancel")
+        // fire() not fireCli: fireCli shares lastFire with the hotkey
+        // debounce and would swallow this call when F13 just entered
+        // transcribing and immediately cancelled.
+        fire("'\(cli)' cancel 2>/dev/null")
         lastTerminalPhase = nil
         state = "idle"
         render()
